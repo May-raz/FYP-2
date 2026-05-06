@@ -1,0 +1,2656 @@
+import React, { useState, useEffect, createContext, useContext, useRef, useCallback } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import axios from 'axios';
+import './App.css';
+import { ChatEndModal } from './components/ChatEndModal.jsx';
+
+/** Prefer higher-quality English voices when the browser exposes them (Chrome/Edge/Safari vary). */
+function pickBestEnglishVoice() {
+  if (typeof window === 'undefined' || !window.speechSynthesis) return null;
+  const voices = window.speechSynthesis.getVoices();
+  if (!voices?.length) return null;
+  const en = voices.filter(
+    (v) => v.lang && v.lang.toLowerCase().startsWith('en')
+  );
+  const pool = en.length ? en : voices;
+  const rank = (name, lang) => {
+    const n = (name || '').toLowerCase();
+    const l = (lang || '').toLowerCase();
+    let s = 0;
+    if (n.includes('google')) s += 55;
+    if (n.includes('natural') || n.includes('neural')) s += 45;
+    if (n.includes('premium')) s += 35;
+    if (n.includes('enhanced')) s += 25;
+    if (n.includes('samantha')) s += 28;
+    if (n.includes('aaron')) s += 20;
+    if (n.includes('aria')) s += 26;
+    if (n.includes('jenny')) s += 26;
+    if (n.includes('guy')) s += 18;
+    if (n.includes('ryan')) s += 18;
+    if (n.includes('ava')) s += 20;
+    if (n.includes('zira')) s += 12;
+    if (n.includes('microsoft') && n.includes('online')) s += 30;
+    if (l.includes('en-us')) s += 8;
+    if (l.includes('en-gb')) s += 4;
+    return s;
+  };
+  return [...pool].sort(
+    (a, b) => rank(b.name, b.lang) - rank(a.name, a.lang)
+  )[0];
+}
+
+/** Light cleanup for Web Speech API output (spacing + leading fillers). */
+function cleanVoiceTranscript(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let t = raw.replace(/\s+/g, ' ').trim();
+  t = t.replace(/\b(um|uh|erm|er|ah|hmm)\b/gi, ' ');
+  t = t.replace(/[^\w\s'?.!,]/g, ' ');
+  t = t.replace(/\s+/g, ' ').trim();
+  if (t && !/[.?!]$/.test(t)) t = `${t}.`;
+  if (t.length > 1) t = t.charAt(0).toUpperCase() + t.slice(1);
+  return t;
+}
+
+function tokenizeNormalized(text) {
+  return (text || '')
+    .toLowerCase()
+    .replace(/[^\w\s']/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function detectEndIntent(text) {
+  const normalized = (text || '').toLowerCase().trim();
+  const phraseSeeds = [
+    'end chat',
+    'stop talking',
+    'thats enough',
+    "that's enough",
+    'i want to end this',
+    'let us end this',
+    "let's end this",
+    'bye',
+    'goodbye',
+    'i am done',
+    "i'm done",
+    'stop this',
+  ];
+
+  for (const p of phraseSeeds) {
+    if (normalized.includes(p)) {
+      return { matched: p, confidence: 0.95 };
+    }
+  }
+
+  const inputTokens = new Set(tokenizeNormalized(normalized));
+  if (!inputTokens.size) return { matched: null, confidence: 0 };
+
+  let best = 0;
+  let matched = null;
+  for (const phrase of phraseSeeds) {
+    const phraseTokens = new Set(tokenizeNormalized(phrase));
+    const overlap = [...phraseTokens].filter((t) => inputTokens.has(t)).length;
+    const score = overlap / Math.max(phraseTokens.size, 1);
+    if (score > best) {
+      best = score;
+      matched = phrase;
+    }
+  }
+
+  if (inputTokens.has('bye') || inputTokens.has('goodbye')) {
+    best = Math.max(best, 0.9);
+  }
+  return { matched, confidence: best };
+}
+
+function inferMessageEmotion(text) {
+  const t = (text || '').toLowerCase();
+  if (!t.trim()) return 'neutral';
+  const angry = /\b(hate|angry|furious|annoyed|frustrated|ugh|worst|terrible|awful|rage|mad at)\b/;
+  const sad = /\b(sad|depressed|lonely|cry|crying|tears|miss you|hurts|hopeless|down|miserable)\b/;
+  const happy = /\b(happy|great|awesome|love it|excited|celebrate|yay|wonderful|amazing|joy|glad|lol)\b/;
+  if (angry.test(t)) return 'angry';
+  if (sad.test(t)) return 'sad';
+  if (happy.test(t)) return 'happy';
+  return 'neutral';
+}
+
+function buildEmotionTrend(messages) {
+  const counts = { happy: 0, sad: 0, angry: 0, neutral: 0 };
+  for (const m of messages || []) {
+    if (m.type !== 'user') continue;
+    const e = m.emotion || inferMessageEmotion(m.content);
+    if (Object.prototype.hasOwnProperty.call(counts, e)) counts[e] += 1;
+    else counts.neutral += 1;
+  }
+  const total = Object.values(counts).reduce((a, b) => a + b, 0) || 1;
+  return ['happy', 'sad', 'angry', 'neutral'].map((label) => ({
+    label,
+    count: counts[label],
+    pct: Math.round((100 * counts[label]) / total),
+  }));
+}
+
+const _rawFlaskApi =
+  typeof process !== 'undefined' &&
+  process.env &&
+  (process.env.REACT_APP_FLASK_URL || process.env.REACT_APP_API_URL)
+    ? String(process.env.REACT_APP_FLASK_URL || process.env.REACT_APP_API_URL).trim()
+    : '';
+const API_BASE = (_rawFlaskApi || 'http://127.0.0.1:5050').replace(/\/$/, '');
+axios.defaults.baseURL = API_BASE;
+const _rawGamificationApi =
+  typeof process !== 'undefined' &&
+  process.env &&
+  (process.env.REACT_APP_NODE_URL || process.env.REACT_APP_GAMIFICATION_API_URL)
+    ? String(process.env.REACT_APP_NODE_URL || process.env.REACT_APP_GAMIFICATION_API_URL).trim()
+    : '';
+const _gamiHost =
+  typeof window !== 'undefined' && window.location?.hostname
+    ? window.location.hostname
+    : '127.0.0.1';
+const GAMIFICATION_BASE = (
+  _rawGamificationApi ||
+  `http://${_gamiHost}:5000`
+).replace(/\/$/, '');
+console.info('API config', { flaskBase: API_BASE, gamificationBase: GAMIFICATION_BASE });
+
+function authHeaders() {
+  const token = localStorage.getItem('token')?.trim();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// Log real API failures; skip noisy console errors for expected auth cases (no/invalid token, wrong password).
+axios.interceptors.response.use(
+  response => response,
+  error => {
+    const status = error.response?.status;
+    const url = String(error.config?.url || '');
+    const quiet401 =
+      status === 401 &&
+      (url.includes('/api/user/profile') ||
+        url.includes('/api/auth/login') ||
+        url.includes('/api/auth/signup'));
+    if (!quiet401) {
+      console.error('API Error:', error.response?.data || error.message);
+    }
+    if (status === 429) {
+      console.warn('API Rate limit hit, implementing backoff...');
+    }
+    return Promise.reject(error);
+  }
+);
+
+// Auth Context
+const AuthContext = createContext();
+
+const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const token = localStorage.getItem('token')?.trim();
+    if (token) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+      axios.get('/api/user/profile')
+        .then(response => setUser(response.data))
+        .catch(() => {
+          localStorage.removeItem('token');
+          delete axios.defaults.headers.common['Authorization'];
+        })
+        .finally(() => setLoading(false));
+    } else {
+      setLoading(false);
+    }
+  }, []);
+
+  const login = async (username, password) => {
+    try {
+      const response = await axios.post('/api/auth/login', { username, password });
+      const { token: rawToken, user } = response.data;
+      const token = String(rawToken || '').trim();
+
+      localStorage.setItem('token', token);
+      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+      setUser(user);
+      
+      return { success: true };
+    } catch (error) {
+      return { 
+        success: false, 
+        error: error.response?.data?.error || 'Login failed' 
+      };
+    }
+  };
+
+  const signup = async (userData) => {
+    try {
+      const response = await axios.post('/api/auth/signup', userData);
+      const { token: rawToken, user } = response.data;
+      const token = String(rawToken || '').trim();
+
+      localStorage.setItem('token', token);
+      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+      setUser(user);
+      
+      return { success: true };
+    } catch (error) {
+      return { 
+        success: false, 
+        error: error.response?.data?.error || 'Signup failed' 
+      };
+    }
+  };
+
+  const logout = () => {
+    localStorage.removeItem('token');
+    delete axios.defaults.headers.common['Authorization'];
+    setUser(null);
+  };
+
+  const updateUserLevel = async (level) => {
+    try {
+      const response = await axios.post('/api/user/set-level', { level });
+      if (response.data.level_changed) {
+        setUser(prev => ({
+          ...prev,
+          level: response.data.level,
+          proficiency_score: response.data.proficiency_score
+        }));
+      }
+      return { success: true, data: response.data };
+    } catch (error) {
+      return { 
+        success: false, 
+        error: error.response?.data?.error || 'Failed to update level' 
+      };
+    }
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, login, signup, logout, loading, updateUserLevel }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within AuthProvider');
+  }
+  return context;
+};
+
+// Enhanced Speech Recognition Hook with better error handling
+const useSpeechRecognition = () => {
+  const [isListening, setIsListening] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  const [browserSupported, setBrowserSupported] = useState(false);
+  const [error, setError] = useState(null);
+  const recognitionRef = useRef(null);
+  const silenceTimerRef = useRef(null);
+  const retryCountRef = useRef(0);
+  const accumulatedFinalRef = useRef('');
+  const MIN_CONFIDENCE = 0.35;
+  
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    setBrowserSupported(!!SpeechRecognition);
+  }, []);
+
+  const startListening = useCallback(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    
+    if (!SpeechRecognition) {
+      setError('Speech recognition not supported in this browser. Please use Chrome.');
+      return;
+    }
+
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+    }
+
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+    }
+
+    recognitionRef.current = new SpeechRecognition();
+    const recognition = recognitionRef.current;
+
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = (navigator.language || 'en-US').startsWith('en') ? navigator.language : 'en-US';
+    recognition.maxAlternatives = 5;
+
+    recognition.onstart = () => {
+      accumulatedFinalRef.current = '';
+      setIsListening(true);
+      setError(null);
+      retryCountRef.current = 0;
+      console.log('🎤 Listening (en-US, confidence-aware)...');
+    };
+
+    recognition.onresult = (event) => {
+      let interimPiece = '';
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const res = event.results[i];
+        const piece = res[0]?.transcript ?? '';
+        const confidence = typeof res[0]?.confidence === 'number' ? res[0].confidence : 1;
+        if (res.isFinal) {
+          const t = piece.trim();
+          if (t && confidence >= MIN_CONFIDENCE) {
+            accumulatedFinalRef.current = accumulatedFinalRef.current
+              ? `${accumulatedFinalRef.current} ${t}`
+              : t;
+          }
+        } else if (recognition.interimResults) {
+          interimPiece += piece;
+        }
+      }
+
+      const fullTranscript = (
+        accumulatedFinalRef.current + (interimPiece ? ` ${interimPiece.trim()}` : '')
+      ).trim();
+      setTranscript(fullTranscript);
+
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
+
+      silenceTimerRef.current = setTimeout(() => {
+        if (fullTranscript && fullTranscript.trim().length > 0) {
+          console.log('🔇 Pause detected, stopping listening...');
+          stopListening();
+        }
+      }, 2600);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      console.log('🎤 Recognition ended');
+    };
+
+    recognition.onerror = (event) => {
+      setIsListening(false);
+      console.error('🎤 Recognition error:', event.error);
+      
+      switch (event.error) {
+        case 'not-allowed':
+          setError('Please allow microphone access in your browser settings');
+          break;
+        case 'network':
+          setError(
+            "Voice input: your browser could not reach the speech service (Chrome uses Google's servers for the mic; that is separate from the tutor API). Type your message instead, or check VPN/firewall/ad-blockers and try the mic again."
+          );
+          break;
+        case 'no-speech':
+          if (retryCountRef.current < 2) {
+            retryCountRef.current++;
+            setError('No speech detected - trying again...');
+            setTimeout(() => startListening(), 1000);
+          } else {
+            setError('No speech detected after multiple attempts');
+          }
+          break;
+        case 'audio-capture':
+          setError('Microphone not available - please check your device');
+          break;
+        case 'service-not-allowed':
+          setError('Speech recognition service not available');
+          break;
+        default:
+          setError(`Speech recognition error: ${event.error}`);
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch (err) {
+      setError('Failed to start speech recognition');
+      setIsListening(false);
+    }
+  }, []);
+
+  const stopListening = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+    }
+    
+    setIsListening(false);
+  }, []);
+
+  const resetTranscript = useCallback(() => {
+    setTranscript('');
+    setError(null);
+    retryCountRef.current = 0;
+  }, []);
+
+  return {
+    isListening,
+    transcript,
+    startListening,
+    stopListening,
+    resetTranscript,
+    browserSupported,
+    error
+  };
+};
+
+// Protected Route Component
+const ProtectedRoute = ({ children }) => {
+  const { user, loading } = useAuth();
+  
+  if (loading) {
+    return (
+      <div className="loading-container">
+        <div className="loading-spinner"></div>
+        <p>Loading...</p>
+      </div>
+    );
+  }
+  
+  return user ? children : <Navigate to="/login" />;
+};
+
+// Enhanced Landing Page
+const LandingPage = () => {
+  const navigate = useNavigate();
+  const { user } = useAuth();
+
+  if (user) {
+    navigate('/stats');
+    return null;
+  }
+
+  return (
+    <div className="landing-page">
+      <header className="landing-header">
+        <nav className="navbar">
+          <div className="nav-brand">
+            <h2>🎓 AI English Tutor v3.1</h2>
+          </div>
+          <div className="nav-links">
+            <button onClick={() => navigate('/login')} className="btn-secondary">
+              Login
+            </button>
+            <button onClick={() => navigate('/signup')} className="btn-primary">
+              Get Started
+            </button>
+          </div>
+        </nav>
+      </header>
+
+      <main className="landing-main">
+        <section className="hero">
+          <div className="hero-content">
+            <h1>Master English with Advanced AI Analysis</h1>
+            <p className="hero-subtitle">
+              Experience cutting-edge pronunciation scoring, grammar analysis, and fluency metrics. 
+              Emma adapts her teaching style to your exact proficiency level with enhanced drill-based feedback.
+            </p>
+            <div className="hero-features">
+              <div className="feature-badge">📊 Phoneme-Level Scoring</div>
+              <div className="feature-badge">🎯 Enhanced Grammar Analysis</div>
+              <div className="feature-badge">⚡ Advanced Fluency Metrics</div>
+              <div className="feature-badge">🎭 Manual Level Selection</div>
+              <div className="feature-badge">🔧 Drill-Based Correction</div>
+            </div>
+            <div className="hero-buttons">
+              <button onClick={() => navigate('/signup')} className="btn-primary btn-large">
+                Start Enhanced Learning
+              </button>
+            </div>
+          </div>
+          <div className="hero-visual">
+            <div className="feature-preview">
+              <div className="analysis-preview">
+                <div className="score-circle">
+                  <span className="score">87</span>
+                  <span className="label">Overall</span>
+                </div>
+                <div className="score-breakdown">
+                  <div className="score-item">
+                    <span>Pronunciation</span>
+                    <div className="score-bar">
+                      <div className="score-fill pronunciation" style={{width: '84%'}}></div>
+                    </div>
+                    <span>84%</span>
+                  </div>
+                  <div className="score-item">
+                    <span>Grammar</span>
+                    <div className="score-bar">
+                      <div className="score-fill grammar" style={{width: '92%'}}></div>
+                    </div>
+                    <span>92%</span>
+                  </div>
+                  <div className="score-item">
+                    <span>Fluency</span>
+                    <div className="score-bar">
+                      <div className="score-fill fluency" style={{width: '85%'}}></div>
+                    </div>
+                    <span>85%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="features">
+          <div className="container">
+            <h2>Enhanced AI-Powered Features</h2>
+            <div className="features-grid">
+              <div className="feature-card">
+                <div className="feature-icon">📊</div>
+                <h3>Phoneme-Level Pronunciation Scoring</h3>
+                <p>Advanced analysis with difficulty-adjusted scoring and specific mispronunciation detection.</p>
+              </div>
+              <div className="feature-card">
+                <div className="feature-icon">🎯</div>
+                <h3>Enhanced Grammar & Fluency Analysis</h3>
+                <p>Comprehensive error categorization with pause analysis and filler word detection.</p>
+              </div>
+              <div className="feature-card">
+                <div className="feature-icon">🎭</div>
+                <h3>Manual Level Selection</h3>
+                <p>Choose your starting level or let Emma adapt automatically based on your performance.</p>
+              </div>
+              <div className="feature-card">
+                <div className="feature-icon">🔧</div>
+                <h3>Drill-Based Accent Correction</h3>
+                <p>Structured exercises with "You said... Here's how to fix it... Practice these" methodology.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer className="landing-footer">
+        <div className="container">
+          <p>&copy; 2025 AI English Tutor v3.1. Enhanced language learning technology.</p>
+        </div>
+      </footer>
+    </div>
+  );
+};
+
+// Enhanced Signup Page with Manual Level Selection
+const SignupPage = () => {
+  const [formData, setFormData] = useState({
+    username: '',
+    email: '',
+    fullName: '',
+    password: '',
+    confirmPassword: '',
+    initialLevel: 'auto'
+  });
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const { signup } = useAuth();
+  const navigate = useNavigate();
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+
+    if (formData.password !== formData.confirmPassword) {
+      setError('Passwords do not match');
+      setLoading(false);
+      return;
+    }
+
+    const result = await signup({
+      username: formData.username,
+      email: formData.email,
+      fullName: formData.fullName,
+      password: formData.password,
+      initialLevel: formData.initialLevel
+    });
+    
+    if (result.success) {
+      navigate('/stats');
+    } else {
+      setError(result.error);
+    }
+    setLoading(false);
+  };
+
+  const handleChange = (e) => {
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+  };
+
+  return (
+    <div className="auth-page">
+      <div className="auth-container">
+        <div className="auth-header">
+          <h1>Start Your Enhanced Learning Journey</h1>
+          <p>Join the next generation of English learning with AI-powered analysis</p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="auth-form">
+          {error && <div className="error-message">{error}</div>}
+          
+          <div className="form-group">
+            <label htmlFor="fullName">Full Name</label>
+            <input
+              type="text"
+              id="fullName"
+              name="fullName"
+              value={formData.fullName}
+              onChange={handleChange}
+              required
+              placeholder="Enter your full name"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="username">Username</label>
+            <input
+              type="text"
+              id="username"
+              name="username"
+              value={formData.username}
+              onChange={handleChange}
+              required
+              placeholder="Choose a username"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="email">Email</label>
+            <input
+              type="email"
+              id="email"
+              name="email"
+              value={formData.email}
+              onChange={handleChange}
+              required
+              placeholder="Enter your email"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="password">Password</label>
+            <input
+              type="password"
+              id="password"
+              name="password"
+              value={formData.password}
+              onChange={handleChange}
+              required
+              placeholder="Create a password"
+              minLength="6"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="confirmPassword">Confirm Password</label>
+            <input
+              type="password"
+              id="confirmPassword"
+              name="confirmPassword"
+              value={formData.confirmPassword}
+              onChange={handleChange}
+              required
+              placeholder="Confirm your password"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="initialLevel">Starting Level (NEW!)</label>
+            <select
+              id="initialLevel"
+              name="initialLevel"
+              value={formData.initialLevel}
+              onChange={handleChange}
+              className="level-select"
+            >
+              <option value="auto">🤖 Let Emma determine automatically</option>
+              <option value="beginner">🌱 Beginner - I'm just starting</option>
+              <option value="intermediate">🌿 Intermediate - I know some English</option>
+              <option value="advanced">🌳 Advanced - I'm quite confident</option>
+            </select>
+            <small className="helper-text">
+              {formData.initialLevel === 'auto'
+                ? 'Your scores start at 0. After your first chat message (voice or text), Emma sets your level and scores from that reply—nothing is guessed at signup.'
+                : 'You can change this later in your profile.'}
+            </small>
+          </div>
+
+          <button type="submit" disabled={loading} className="btn-primary btn-full">
+            {loading ? 'Creating account...' : 'Start Enhanced Learning'}
+          </button>
+        </form>
+
+        <div className="auth-footer">
+          <p>
+            Already have an account?{' '}
+            <span 
+              onClick={() => navigate('/login')} 
+              className="auth-link"
+            >
+              Sign in here
+            </span>
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Login Page (unchanged but enhanced error handling)
+const LoginPage = () => {
+  const [formData, setFormData] = useState({ username: '', password: '' });
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const { login } = useAuth();
+  const navigate = useNavigate();
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+
+    const result = await login(formData.username, formData.password);
+    
+    if (result.success) {
+      navigate('/stats');
+    } else {
+      setError(result.error);
+    }
+    setLoading(false);
+  };
+
+  const handleChange = (e) => {
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+  };
+
+  return (
+    <div className="auth-page">
+      <div className="auth-container">
+        <div className="auth-header">
+          <h1>Welcome Back!</h1>
+          <p>Continue your enhanced English learning journey</p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="auth-form">
+          {error && <div className="error-message">{error}</div>}
+          
+          <div className="form-group">
+            <label htmlFor="username">Username</label>
+            <input
+              type="text"
+              id="username"
+              name="username"
+              value={formData.username}
+              onChange={handleChange}
+              required
+              placeholder="Enter your username"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="password">Password</label>
+            <input
+              type="password"
+              id="password"
+              name="password"
+              value={formData.password}
+              onChange={handleChange}
+              required
+              placeholder="Enter your password"
+            />
+          </div>
+
+          <button type="submit" disabled={loading} className="btn-primary btn-full">
+            {loading ? 'Signing in...' : 'Sign In'}
+          </button>
+        </form>
+
+        <div className="auth-footer">
+          <p>
+            Don't have an account?{' '}
+            <span 
+              onClick={() => navigate('/signup')} 
+              className="auth-link"
+            >
+              Sign up here
+            </span>
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// FIX #3: Advanced Pronunciation Assessment Component
+const AdvancedPronunciationAssessment = ({ onClose }) => {
+  const [assessmentData, setAssessmentData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const fetchAssessment = async () => {
+      try {
+        setLoading(true);
+        const response = await axios.get('/api/pronunciation/advanced-assessment');
+        setAssessmentData(response.data);
+      } catch (err) {
+        setError(err.response?.data?.error || 'Failed to load assessment');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchAssessment();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="assessment-modal">
+        <div className="modal-content">
+          <div className="loading-container">
+            <div className="loading-spinner"></div>
+            <p>Loading advanced pronunciation assessment...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="assessment-modal">
+        <div className="modal-content">
+          <div className="error-message">
+            <h3>Assessment Error</h3>
+            <p>{error}</p>
+            <button onClick={onClose} className="btn-primary">Close</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="assessment-modal">
+      <div className="modal-content advanced-assessment">
+        <div className="modal-header">
+          <h2>📊 Advanced Pronunciation Assessment</h2>
+          <button onClick={onClose} className="close-button">×</button>
+        </div>
+        
+        <div className="assessment-content">
+          <div className="score-section">
+            <div className="overall-score">
+              <div className="score-circle large">
+                <span className="score">{assessmentData.overall_score}</span>
+                <span className="label">Overall Score</span>
+              </div>
+              <div className="trend-indicator">
+                <span className={`trend ${assessmentData.trend.toLowerCase()}`}>
+                  {assessmentData.trend === 'Improving' ? '📈' : 
+                   assessmentData.trend === 'Declining' ? '📉' : '📊'} {assessmentData.trend}
+                </span>
+              </div>
+            </div>
+            
+            {assessmentData.recent_scores && (
+              <div className="score-history">
+                <h4>Recent Progress</h4>
+                <div className="score-chart">
+                  {assessmentData.recent_scores.map((score, index) => (
+                    <div key={index} className="score-bar">
+                      <div 
+                        className="score-fill pronunciation" 
+                        style={{height: `${Math.max(score, 10)}%`}}
+                        title={`Session ${index + 1}: ${score}%`}
+                      ></div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="analysis-grid">
+            <div className="analysis-section">
+              <h3>🎯 Areas for Improvement</h3>
+              <ul className="improvement-list">
+                {assessmentData.improvement_areas.map((area, index) => (
+                  <li key={index}>{area}</li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="analysis-section">
+              <h3>💪 Your Strengths</h3>
+              <ul className="strengths-list">
+                {assessmentData.strengths.map((strength, index) => (
+                  <li key={index}>{strength}</li>
+                ))}
+              </ul>
+            </div>
+
+            {assessmentData.problem_sounds.length > 0 && (
+              <div className="analysis-section">
+                <h3>🔤 Problem Sounds</h3>
+                <div className="sound-tags">
+                  {assessmentData.problem_sounds.map((sound, index) => (
+                    <span key={index} className="sound-tag">{sound}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {assessmentData.mispronounced_words.length > 0 && (
+              <div className="analysis-section">
+                <h3>📚 Words to Practice</h3>
+                <div className="word-tags">
+                  {assessmentData.mispronounced_words.map((word, index) => (
+                    <span key={index} className="word-tag">{word}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="analysis-section">
+              <h3>💡 Recommendations</h3>
+              <ul className="recommendations-list">
+                {assessmentData.recommendations.map((rec, index) => (
+                  <li key={index}>{rec}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+
+          <div className="detailed-analysis">
+            <h3>📋 Detailed Analysis</h3>
+            <p>{assessmentData.detailed_analysis}</p>
+            <div className="stats-summary">
+              <span>Sessions Analyzed: <strong>{assessmentData.sessions_analyzed}</strong></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// FIX #3: Detailed Progress Analytics Component  
+const DetailedProgressAnalytics = ({ onClose }) => {
+  const [analyticsData, setAnalyticsData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const fetchAnalytics = async () => {
+      try {
+        setLoading(true);
+        const response = await axios.get('/api/progress/detailed-analytics');
+        setAnalyticsData(response.data);
+      } catch (err) {
+        setError(err.response?.data?.error || 'Failed to load analytics');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchAnalytics();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="analytics-modal">
+        <div className="modal-content">
+          <div className="loading-container">
+            <div className="loading-spinner"></div>
+            <p>Loading detailed progress analytics...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="analytics-modal">
+        <div className="modal-content">
+          <div className="error-message">
+            <h3>Analytics Error</h3>
+            <p>{error}</p>
+            <button onClick={onClose} className="btn-primary">Close</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="analytics-modal">
+      <div className="modal-content detailed-analytics">
+        <div className="modal-header">
+          <h2>📈 Detailed Progress Analytics</h2>
+          <button onClick={onClose} className="close-button">×</button>
+        </div>
+        
+        <div className="analytics-content">
+          <div className="overview-section">
+            <h3>📊 Current Performance Overview</h3>
+            <div className="performance-grid">
+              <div className="perf-card pronunciation">
+                <h4>🗣️ Pronunciation</h4>
+                <div className="perf-score">{analyticsData.current_scores.pronunciation}%</div>
+                <div className="velocity">
+                  {analyticsData.learning_velocity.pronunciation > 0 ? '📈' : 
+                   analyticsData.learning_velocity.pronunciation < 0 ? '📉' : '➡️'} 
+                  {analyticsData.learning_velocity.pronunciation > 0 ? '+' : ''}{analyticsData.learning_velocity.pronunciation}%
+                </div>
+              </div>
+              <div className="perf-card grammar">
+                <h4>📝 Grammar</h4>
+                <div className="perf-score">{analyticsData.current_scores.grammar}%</div>
+                <div className="velocity">
+                  {analyticsData.learning_velocity.grammar > 0 ? '📈' : 
+                   analyticsData.learning_velocity.grammar < 0 ? '📉' : '➡️'} 
+                  {analyticsData.learning_velocity.grammar > 0 ? '+' : ''}{analyticsData.learning_velocity.grammar}%
+                </div>
+              </div>
+              <div className="perf-card fluency">
+                <h4>⚡ Fluency</h4>
+                <div className="perf-score">{analyticsData.current_scores.fluency}%</div>
+                <div className="velocity">
+                  {analyticsData.learning_velocity.fluency > 0 ? '📈' : 
+                   analyticsData.learning_velocity.fluency < 0 ? '📉' : '➡️'} 
+                  {analyticsData.learning_velocity.fluency > 0 ? '+' : ''}{analyticsData.learning_velocity.fluency}%
+                </div>
+              </div>
+              <div className="perf-card overall">
+                <h4>🎯 Overall</h4>
+                <div className="perf-score">{analyticsData.current_scores.overall}%</div>
+                <div className="improvement-rate">
+                  Rate: {analyticsData.improvement_rate.toFixed(1)}%/session
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="analytics-grid">
+            <div className="analytics-section">
+              <h3>📅 Learning Activity</h3>
+              <div className="activity-stats">
+                <div className="stat-item">
+                  <span className="stat-label">Total Sessions:</span>
+                  <span className="stat-value">{analyticsData.total_sessions}</span>
+                </div>
+                <div className="stat-item">
+                  <span className="stat-label">Active Days:</span>
+                  <span className="stat-value">{analyticsData.days_active}</span>
+                </div>
+                <div className="stat-item">
+                  <span className="stat-label">Level Changes:</span>
+                  <span className="stat-value">{analyticsData.level_progressions}</span>
+                </div>
+              </div>
+              
+              {analyticsData.weekly_session_counts.length > 0 && (
+                <div className="weekly-chart">
+                  <h4>Weekly Sessions</h4>
+                  <div className="chart-bars">
+                    {analyticsData.weekly_session_counts.map((count, index) => (
+                      <div key={index} className="chart-bar">
+                        <div 
+                          className="bar-fill" 
+                          style={{height: `${Math.max((count / Math.max(...analyticsData.weekly_session_counts)) * 100, 10)}%`}}
+                          title={`Week ${index + 1}: ${count} sessions`}
+                        ></div>
+                        <span className="bar-label">W{index + 1}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="analytics-section">
+              <h3>🎯 Problem Areas</h3>
+              <ul className="problem-areas-list">
+                {analyticsData.problem_areas.map((area, index) => (
+                  <li key={index} className="problem-item">
+                    <span className="problem-icon">⚠️</span>
+                    {area}
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="analytics-section">
+              <h3>💪 Your Strengths</h3>
+              <ul className="strengths-list">
+                {analyticsData.strengths.map((strength, index) => (
+                  <li key={index} className="strength-item">
+                    <span className="strength-icon">✅</span>
+                    {strength}
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="analytics-section">
+              <h3>🔮 Performance Consistency</h3>
+              <div className="consistency-grid">
+                <div className="consistency-item">
+                  <span className="skill-name">Pronunciation:</span>
+                  <span className={`consistency-level ${analyticsData.consistency_ratings.pronunciation.toLowerCase()}`}>
+                    {analyticsData.consistency_ratings.pronunciation}
+                  </span>
+                </div>
+                <div className="consistency-item">
+                  <span className="skill-name">Grammar:</span>
+                  <span className={`consistency-level ${analyticsData.consistency_ratings.grammar.toLowerCase()}`}>
+                    {analyticsData.consistency_ratings.grammar}
+                  </span>
+                </div>
+                <div className="consistency-item">
+                  <span className="skill-name">Fluency:</span>
+                  <span className={`consistency-level ${analyticsData.consistency_ratings.fluency.toLowerCase()}`}>
+                    {analyticsData.consistency_ratings.fluency}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="milestones-section">
+            <h3>🏆 Milestones Achieved</h3>
+            <div className="milestones-grid">
+              {analyticsData.milestones_achieved.map((milestone, index) => (
+                <div key={index} className="milestone-badge">
+                  {milestone}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {analyticsData.predictive_insights.length > 0 && (
+            <div className="insights-section">
+              <h3>🔮 Predictive Insights</h3>
+              <ul className="insights-list">
+                {analyticsData.predictive_insights.map((insight, index) => (
+                  <li key={index} className="insight-item">
+                    <span className="insight-icon">💡</span>
+                    {insight}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="next-goals-section">
+            <h3>🎯 Next Goals</h3>
+            <ul className="goals-list">
+              {analyticsData.next_goals.map((goal, index) => (
+                <li key={index} className="goal-item">
+                  <span className="goal-icon">🎯</span>
+                  {goal}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="summary-section">
+            <h3>📋 Analytics Summary</h3>
+            <p>{analyticsData.analytics_summary}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Enhanced Dashboard Component (FIX #3)
+const Dashboard = () => {
+  const [profile, setProfile] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [gamification, setGamification] = useState({
+    profile: null,
+    streak: null,
+    leaderboard: [],
+    dueCards: 0,
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [showAdvancedAssessment, setShowAdvancedAssessment] = useState(false);
+  const [showDetailedAnalytics, setShowDetailedAnalytics] = useState(false);
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        
+        // Fetch profile and stats separately with individual error handling
+        const profilePromise = axios.get('/api/user/profile').catch(err => {
+          console.error('Profile fetch error:', err);
+          throw new Error('Failed to load profile');
+        });
+        
+        const statsPromise = axios.get('/api/user/stats').catch(err => {
+          console.error('Stats fetch error:', err);
+          // Return default stats if the endpoint fails
+          return {
+            data: {
+              basic: { total_sessions: 0, average_wpm: 0 },
+              proficiency: { 
+                overall_score: 0, 
+                pronunciation_score: 0, 
+                grammar_score: 0, 
+                fluency_score: 0,
+                current_level: 'beginner',
+                current_persona: 'beginner'
+              },
+              vocabulary: { mispronounced: 0 },
+              recent_activity: { 
+                avg_pronunciation_score: 0, 
+                avg_grammar_score: 0, 
+                total_errors_corrected: 0 
+              }
+            }
+          };
+        });
+
+        const gamiPromise = (async () => {
+          try {
+            const headers = authHeaders();
+            const [gProfile, gStreak, gLeaderboard, gFlashcards] = await Promise.all([
+              axios.get(`${GAMIFICATION_BASE}/api/v1/gamification/profile/self`, { headers, timeout: 10000 }),
+              axios.get(`${GAMIFICATION_BASE}/api/v1/gamification/streak/self`, { headers, timeout: 10000 }),
+              axios.get(`${GAMIFICATION_BASE}/api/v1/gamification/leaderboard?scope=weekly&persona=diplomat&limit=5`, { headers, timeout: 10000 }),
+              axios.get(`${GAMIFICATION_BASE}/api/v1/gamification/flashcards/due/me?limit=20`, { headers, timeout: 10000 }),
+            ]);
+            return {
+              profile: gProfile.data,
+              streak: gStreak.data,
+              leaderboard: gLeaderboard.data?.entries || [],
+              dueCards: Array.isArray(gFlashcards.data?.cards) ? gFlashcards.data.cards.length : 0,
+            };
+          } catch (e) {
+            console.warn(
+              'Gamification fetch warning:',
+              {
+                base: GAMIFICATION_BASE,
+                status: e?.response?.status,
+                code: e?.code,
+                message: e?.message || String(e),
+              }
+            );
+            return { profile: null, streak: null, leaderboard: [], dueCards: 0 };
+          }
+        })();
+
+        const [profileRes, statsRes, gami] = await Promise.all([profilePromise, statsPromise, gamiPromise]);
+        
+        setProfile(profileRes.data);
+        setStats(statsRes.data);
+        setGamification(gami);
+        
+      } catch (error) {
+        console.error('Failed to fetch dashboard data:', error);
+        setError(error.message || 'Failed to load dashboard data');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="loading-container">
+        <div className="loading-spinner"></div>
+        <p>Loading your enhanced dashboard...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="loading-container">
+        <div className="error-message">
+          <h3>Dashboard Error</h3>
+          <p>{error}</p>
+          <button onClick={() => window.location.reload()} className="btn-primary">
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <div className="loading-container">
+        <div className="error-message">
+          <h3>Profile Not Found</h3>
+          <p>Unable to load your profile. Please try logging in again.</p>
+          <button onClick={logout} className="btn-primary">
+            Login Again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const proficiency = stats.proficiency || {};
+  const levelEmojis = {
+    'beginner': '🌱',
+    'intermediate': '🌿', 
+    'advanced': '🌳',
+    'native': '🏆'
+  };
+
+  const isAutoLevel = profile.profile?.preferences?.auto_level_adjustment !== false;
+  const awaitingAssessment = profile.profile?.awaiting_initial_assessment === true;
+
+  return (
+    <div className="dashboard">
+      {awaitingAssessment && (
+        <div
+          className="dashboard-assessment-notice"
+          style={{
+            margin: '0 1.25rem 1rem',
+            padding: '12px 16px',
+            borderRadius: 8,
+            background: 'rgba(99, 102, 241, 0.12)',
+            border: '1px solid rgba(99, 102, 241, 0.35)',
+            fontSize: '0.95rem',
+          }}
+        >
+          <strong>Level not measured yet.</strong> Open chat and send one message (typed or voice). Your first reply
+          sets your starting scores and level when &quot;Let Emma decide&quot; is on.
+        </div>
+      )}
+      <header className="dashboard-header">
+        <div className="header-content">
+          <h1>Welcome back, {profile.full_name}! {levelEmojis[proficiency.current_level] || '👋'}</h1>
+          <p>
+            Current Level: <span className="level-badge">{proficiency.current_level || 'Beginner'}</span> 
+            {!isAutoLevel && <span className="manual-badge">📍 Manual</span>}
+            {' '}
+            | Overall Score:{' '}
+            <span className="score-badge" title={awaitingAssessment ? 'Chat once to get your score' : ''}>
+              {awaitingAssessment ? 'Not set yet' : `${proficiency.overall_score ?? 0}%`}
+            </span>
+          </p>
+        </div>
+        <div className="header-actions">
+          <button onClick={() => navigate('/profile')} className="btn-secondary">
+            Profile Settings
+          </button>
+          <button onClick={logout} className="btn-outline">
+            Logout
+          </button>
+        </div>
+      </header>
+
+      <div className="dashboard-grid">
+        {/* Enhanced Proficiency Overview */}
+        <div className="proficiency-overview">
+          <h2>📊 Your Enhanced Proficiency Breakdown</h2>
+          <div className="proficiency-scores">
+            <div className="score-circle-container">
+              <div className="score-circle large">
+                <span className="score">{awaitingAssessment ? '—' : (proficiency.overall_score ?? 0)}</span>
+                <span className="label">Overall</span>
+              </div>
+            </div>
+            <div className="score-breakdown">
+              <div className="score-item">
+                <span className="score-label">Pronunciation</span>
+                <div className="score-bar">
+                  <div className="score-fill pronunciation" 
+                       style={{width: `${proficiency.pronunciation_score || 0}%`}}></div>
+                </div>
+                <span className="score-value">{proficiency.pronunciation_score || 0}%</span>
+              </div>
+              <div className="score-item">
+                <span className="score-label">Grammar</span>
+                <div className="score-bar">
+                  <div className="score-fill grammar" 
+                       style={{width: `${proficiency.grammar_score || 0}%`}}></div>
+                </div>
+                <span className="score-value">{proficiency.grammar_score || 0}%</span>
+              </div>
+              <div className="score-item">
+                <span className="score-label">Fluency</span>
+                <div className="score-bar">
+                  <div className="score-fill fluency" 
+                       style={{width: `${proficiency.fluency_score || 0}%`}}></div>
+                </div>
+                <span className="score-value">{proficiency.fluency_score || 0}%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Enhanced Statistics */}
+        <div className="stats-overview">
+          <h2>📈 Enhanced Learning Statistics</h2>
+          <div className="stats-grid">
+            <div className="stat-card">
+              <div className="stat-icon">💬</div>
+              <div className="stat-content">
+                <h3>{stats.basic?.total_sessions || 0}</h3>
+                <p>Conversations</p>
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-icon">🗣️</div>
+              <div className="stat-content">
+                <h3>{stats.recent_activity?.avg_pronunciation_score || 0}%</h3>
+                <p>Avg Pronunciation</p>
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-icon">📝</div>
+              <div className="stat-content">
+                <h3>{stats.recent_activity?.avg_grammar_score || 0}%</h3>
+                <p>Avg Grammar</p>
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-icon">⚡</div>
+              <div className="stat-content">
+                <h3>{stats.basic?.average_wpm || 0}</h3>
+                <p>Words/Min</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="stats-overview gamification-overview">
+          <h2>🎮 Gamification Progress</h2>
+          <div className="stats-grid">
+            <div className="stat-card">
+              <div className="stat-icon">⭐</div>
+              <div className="stat-content">
+                <h3>{gamification.profile?.levels?.composite || 1}</h3>
+                <p>Composite Level</p>
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-icon">🔥</div>
+              <div className="stat-content">
+                <h3>{gamification.streak?.current || 0}</h3>
+                <p>Current Streak</p>
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-icon">🃏</div>
+              <div className="stat-content">
+                <h3>{gamification.dueCards || 0}</h3>
+                <p>Flashcards Due</p>
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-icon">🏅</div>
+              <div className="stat-content">
+                <h3>{gamification.profile?.weeklySnapshot?.xpEarned || 0}</h3>
+                <p>Weekly XP</p>
+              </div>
+            </div>
+          </div>
+          <div className="mini-leaderboard">
+            <h3>Weekly Leaderboard</h3>
+            {(gamification.leaderboard || []).slice(0, 3).map((entry) => (
+              <div key={entry.rank} className="leader-row">
+                <span>#{entry.rank} {entry.username}</span>
+                <span>Lv {entry.compositeLevel}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Quick Actions - FIX #3: Made components functional */}
+        <div className="quick-actions">
+          <h2>🚀 Continue Enhanced Learning</h2>
+          <div className="action-cards">
+            <div className="action-card primary" onClick={() => navigate('/chat')}>
+              <div className="action-icon">🎯</div>
+              <h3>Enhanced Chat with Emma</h3>
+              <p>Get real-time phoneme-level pronunciation, grammar, and fluency feedback</p>
+            </div>
+            <div className="action-card" onClick={() => setShowAdvancedAssessment(true)}>
+              <div className="action-icon">📊</div>
+              <h3>Advanced Pronunciation Assessment</h3>
+              <p>Practice with drill-based exercises and detailed phoneme analysis</p>
+            </div>
+            <div className="action-card" onClick={() => setShowDetailedAnalytics(true)}>
+              <div className="action-icon">📈</div>
+              <h3>Detailed Progress Analytics</h3>
+              <p>View comprehensive trends and improvement areas with enhanced metrics</p>
+            </div>
+            <div className="action-card" onClick={() => navigate('/flashcards')}>
+              <div className="action-icon">🃏</div>
+              <h3>Flashcard Review</h3>
+              <p>Review due cards and earn grammar XP with spaced repetition</p>
+            </div>
+            <div className="action-card" onClick={() => navigate('/quiz')}>
+              <div className="action-icon">🧠</div>
+              <h3>Grammar Quiz</h3>
+              <p>Take quizzes to unlock more XP and improve weak areas</p>
+            </div>
+            <div className="action-card" onClick={() => navigate('/leaderboard')}>
+              <div className="action-icon">🏆</div>
+              <h3>Leaderboard</h3>
+              <p>Compare your weekly rank with other learners</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Enhanced Recent Activity */}
+        <div className="recent-activity">
+          <h2>🔄 Recent Enhanced Improvements</h2>
+          <div className="activity-list">
+            <div className="activity-item">
+              <span className="activity-icon">🎭</span>
+              <span>
+                Current persona: <strong>{proficiency.current_persona || 'Beginner'}</strong> Emma
+                {!isAutoLevel && <em> (Manual Selection)</em>}
+              </span>
+            </div>
+            <div className="activity-item">
+              <span className="activity-icon">📊</span>
+              <span>Pronunciation errors to work on: {stats.vocabulary?.mispronounced || 0}</span>
+            </div>
+            <div className="activity-item">
+              <span className="activity-icon">📝</span>
+              <span>Grammar corrections made: {stats.recent_activity?.total_errors_corrected || 0}</span>
+            </div>
+            <div className="activity-item">
+              <span className="activity-icon">🗣️</span>
+              <span>Average speaking rate: {stats.basic?.average_wpm || 0} words per minute</span>
+            </div>
+            <div className="activity-item">
+              <span className="activity-icon">🔧</span>
+              <span>Enhanced features: Phoneme analysis, drill exercises, manual level control</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* FIX #3: Modal components for dashboard actions */}
+      {showAdvancedAssessment && (
+        <AdvancedPronunciationAssessment onClose={() => setShowAdvancedAssessment(false)} />
+      )}
+
+      {showDetailedAnalytics && (
+        <DetailedProgressAnalytics onClose={() => setShowDetailedAnalytics(false)} />
+      )}
+    </div>
+  );
+};
+
+// Session wrap-up after "End chat" (short, friendly — no grading UI)
+const SessionSummary = ({ summary, onClose, onBackToDashboard, onDownload }) => {
+  if (!summary) return null;
+
+  const partner =
+    typeof summary.summary === 'string' &&
+    summary.summary.length > 0 &&
+    Array.isArray(summary.improvements);
+
+  if (partner) {
+    return (
+      <ChatEndModal
+        title="Chat summary"
+        summary={summary.summary}
+        improvements={summary.improvements}
+        messageCount={summary.message_count}
+        durationLabel={summary.duration_label}
+        emotionTrend={summary.emotion_trend}
+        onStartNewChat={onClose}
+        onDownloadTranscript={onDownload}
+        onBackToDashboard={onBackToDashboard}
+      />
+    );
+  }
+
+  return (
+    <div className="session-summary-modal">
+      <div className="summary-content">
+        <div className="summary-header">
+          <h2>📊 Chat Session Summary</h2>
+          <div className="session-stats">
+            <span>Messages: {summary.session_stats?.messages_sent || 0}</span>
+            <span>Duration: Practice Session</span>
+          </div>
+        </div>
+
+        <div className="summary-grid">
+          <div className="summary-section achievements">
+            <h3>🏆 Achievements</h3>
+            <ul>
+              {(summary.achievements || []).map((achievement, index) => (
+                <li key={index} className="achievement-item">
+                  {achievement}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="summary-section scores">
+            <h3>📈 Session Scores</h3>
+            <div className="score-grid">
+              <div className="score-item">
+                <span className="score-label">Pronunciation</span>
+                <span className="score-value">{summary.session_stats?.avg_pronunciation_score || 0}%</span>
+              </div>
+              <div className="score-item">
+                <span className="score-label">Grammar</span>
+                <span className="score-value">{summary.session_stats?.avg_grammar_score || 0}%</span>
+              </div>
+              <div className="score-item">
+                <span className="score-label">Fluency</span>
+                <span className="score-value">{summary.session_stats?.avg_fluency_score || 0}%</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="summary-section weaknesses">
+            <h3>⚠️ Areas to Improve</h3>
+            <ul>
+              {(summary.weaknesses || []).map((weakness, index) => (
+                <li key={index} className="weakness-item">
+                  {weakness}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="summary-section recommendations">
+            <h3>💡 Next Steps</h3>
+            <ul>
+              {(summary.recommendations || []).map((recommendation, index) => (
+                <li key={index} className="recommendation-item">
+                  {recommendation}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        {summary.mispronounced_words && summary.mispronounced_words.length > 0 && (
+          <div className="summary-section words-to-practice">
+            <h3>📚 Words to Practice</h3>
+            <div className="word-tags">
+              {summary.mispronounced_words.map((word, index) => (
+                <span key={index} className="word-tag">{word}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="summary-text">
+          <p>{summary.summary_text}</p>
+        </div>
+
+        <div className="summary-actions">
+          <button type="button" onClick={onClose} className="btn-secondary">
+            Start New Chat
+          </button>
+          <button type="button" onClick={onBackToDashboard} className="btn-primary">
+            Back to Dashboard
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Enhanced Chat Component with FIX #1, #4, #5
+const ChatPage = () => {
+  const [messages, setMessages] = useState([]);
+  const [inputText, setInputText] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [audioEnabled, setAudioEnabled] = useState(true);
+  const [retryCount, setRetryCount] = useState(0);
+  const [isEndingChat, setIsEndingChat] = useState(false);
+  const [sessionSummary, setSessionSummary] = useState(null);
+  const [showSessionSummary, setShowSessionSummary] = useState(false);
+  const navigate = useNavigate();
+  const messagesEndRef = useRef(null);
+  const preferredVoiceRef = useRef(null);
+  const isListeningRef = useRef(false);
+  const messagesRef = useRef([]);
+  const retryCountRef = useRef(0);
+  const sessionStartRef = useRef(Date.now());
+
+  const { logout } = useAuth();
+
+  // Enhanced speech recognition
+  const { 
+    isListening, 
+    transcript,
+    startListening, 
+    stopListening,
+    resetTranscript,
+    browserSupported,
+    error
+  } = useSpeechRecognition();
+
+  useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
+
+  useEffect(() => {
+    const refreshVoice = () => {
+      preferredVoiceRef.current = pickBestEnglishVoice();
+    };
+    refreshVoice();
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.onvoiceschanged = refreshVoice;
+    }
+    return () => {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.onvoiceschanged = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      try {
+        window.speechSynthesis?.cancel();
+      } catch (_) { /* ignore */ }
+      stopListening();
+    };
+  }, [stopListening]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    retryCountRef.current = retryCount;
+  }, [retryCount]);
+
+  // Enhanced auth error handler
+  useEffect(() => {
+    const interceptor = axios.interceptors.response.use(
+      response => response,
+      error => {
+        if (error.response?.status === 401) {
+          logout();
+          navigate('/login', { 
+            state: { 
+              message: "Your session has expired. Please log in again." 
+            } 
+          });
+        }
+        return Promise.reject(error);
+      }
+    );
+    
+    return () => {
+      axios.interceptors.response.eject(interceptor);
+    };
+  }, [logout, navigate]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const stopAssistantSpeech = () => {
+    try {
+      window.speechSynthesis?.cancel();
+    } catch (_) { /* ignore */ }
+  };
+
+  // TTS: best available English voice, slightly slower rate for a more natural read
+  const speakText = useCallback((text) => {
+    if (!audioEnabled || !('speechSynthesis' in window)) return;
+
+    try {
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      const v = preferredVoiceRef.current;
+      if (v) {
+        utterance.voice = v;
+        utterance.lang = v.lang || 'en-US';
+      } else {
+        utterance.lang = 'en-US';
+      }
+      utterance.rate = 0.92;
+      utterance.pitch = 1.0;
+      utterance.volume = 1.0;
+
+      utterance.onerror = (e) => {
+        console.warn('TTS Error:', e.error);
+      };
+
+      window.speechSynthesis.speak(utterance);
+    } catch (err) {
+      console.warn('TTS not available:', err);
+    }
+  }, [audioEnabled]);
+
+  const addMessage = useCallback((content, type, analysis = null, accentFeedback = null, tutorFeedback = null) => {
+    const newMessage = {
+      id: Date.now() + Math.random(),
+      content,
+      type,
+      analysis,
+      accentFeedback,
+      tutorFeedback,
+      timestamp: new Date()
+    };
+
+    setMessages((prev) => {
+      const next = [...prev, newMessage];
+      messagesRef.current = next;
+      return next;
+    });
+    return newMessage;
+  }, []);
+
+  const endChatSession = useCallback(async (optionalMessages) => {
+    stopAssistantSpeech();
+    stopListening();
+    setIsEndingChat(true);
+    const msgs = optionalMessages ?? messagesRef.current ?? [];
+    if (!Array.isArray(msgs) || msgs.length === 0) {
+      setIsEndingChat(false);
+      navigate('/stats');
+      return;
+    }
+
+    const emotionTrend = buildEmotionTrend(msgs);
+
+    try {
+      setIsLoading(true);
+      const response = await axios.post(
+        '/api/chat/partner/end',
+        { messages: msgs },
+        { timeout: 90000 }
+      );
+      const elapsedMs = Math.max(0, Date.now() - sessionStartRef.current);
+      const mins = Math.floor(elapsedMs / 60000);
+      const secs = Math.floor((elapsedMs % 60000) / 1000);
+      setSessionSummary({
+        summary: response.data.summary,
+        improvements: response.data.improvements || [],
+        message_count: response.data.message_count,
+        duration_label: `${mins}m ${secs}s`,
+        emotion_trend: emotionTrend,
+      });
+      setShowSessionSummary(true);
+    } catch (error) {
+      console.error('Failed to generate session wrap-up:', error);
+      const userMessages = msgs.filter((msg) => msg.type === 'user');
+      setSessionSummary({
+        summary: `Nice chatting—you sent ${userMessages.length} message${userMessages.length === 1 ? '' : 's'}. Hope to talk again soon.`,
+        improvements: ['Come back anytime for another relaxed English chat.'],
+        message_count: userMessages.length,
+        duration_label: 'Session ended',
+        emotion_trend: emotionTrend,
+      });
+      setShowSessionSummary(true);
+    } finally {
+      setIsLoading(false);
+      setIsEndingChat(false);
+    }
+  }, [navigate]);
+
+  const sendMessage = useCallback(async (text) => {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return;
+
+    const endIntent = detectEndIntent(trimmed);
+    const wantsEnd = endIntent.confidence >= 0.72;
+
+    stopAssistantSpeech();
+
+    if (wantsEnd) {
+      const userMsg = {
+        id: Date.now() + Math.random(),
+        type: 'user',
+        content: trimmed,
+        analysis: null,
+        accentFeedback: null,
+        tutorFeedback: null,
+        timestamp: new Date(),
+      };
+      const next = [...messagesRef.current, userMsg];
+      messagesRef.current = next;
+      setMessages(next);
+      setInputText('');
+      await endChatSession(next);
+      return;
+    }
+
+    addMessage(trimmed, 'user');
+    setIsLoading(true);
+    setInputText('');
+
+    try {
+      const response = await axios.post(
+        '/api/chat/partner',
+        { message: trimmed },
+        { timeout: 45000 }
+      );
+
+      const botResponse = (response.data.response || '').trim();
+      if (!botResponse || botResponse.length < 1) {
+        throw new Error('Empty reply');
+      }
+
+      addMessage(botResponse, 'bot');
+      setRetryCount(0);
+
+      setTimeout(() => {
+        if (!isListeningRef.current) {
+          speakText(botResponse);
+        }
+      }, 250);
+    } catch (error) {
+      console.error('Chat error:', error);
+      if (
+        retryCountRef.current < 2 &&
+        (error.code === 'ECONNABORTED' || error.response?.status >= 500)
+      ) {
+        setRetryCount((c) => c + 1);
+        setTimeout(() => sendMessage(trimmed), 1500);
+      } else {
+        let errorMessage = 'Hmm, I glitched for a second—mind sending that again?';
+        if (error.code === 'ECONNABORTED') {
+          errorMessage = 'That took too long—want to try a shorter line?';
+        } else if (error.response?.status === 429) {
+          errorMessage = 'Give me a few seconds and try again?';
+        }
+        addMessage(errorMessage, 'bot');
+        setTimeout(() => speakText(errorMessage), 250);
+        setRetryCount(0);
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, [addMessage, endChatSession, speakText]);
+
+  useEffect(() => {
+    if (transcript && !isListening) {
+      const cleaned = cleanVoiceTranscript(transcript);
+      setInputText(cleaned);
+      if (cleaned.trim().length > 2) {
+        setTimeout(() => {
+          sendMessage(cleaned);
+        }, 400);
+      }
+      resetTranscript();
+    }
+  }, [transcript, isListening, resetTranscript, sendMessage]);
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    sendMessage(inputText);
+  };
+
+  const handleVoiceInput = () => {
+    if (!browserSupported) {
+      alert("Speech recognition not supported. Please use Chrome browser for the best experience.");
+      return;
+    }
+
+    if (isListening) {
+      stopAssistantSpeech();
+      stopListening();
+    } else {
+      resetTranscript();
+      stopAssistantSpeech();
+      startListening();
+    }
+  };
+
+  const handleCloseSummary = () => {
+    stopAssistantSpeech();
+    setShowSessionSummary(false);
+    setSessionSummary(null);
+    setMessages([]);
+    messagesRef.current = [];
+    sessionStartRef.current = Date.now();
+  };
+
+  const handleBackToDashboard = () => {
+    stopAssistantSpeech();
+    setShowSessionSummary(false);
+    setSessionSummary(null);
+    navigate('/stats');
+  };
+
+  const handleDownloadTranscript = useCallback(() => {
+    const lines = messagesRef.current.map((m) => {
+      const who = m.type === 'user' ? 'You' : 'Emma';
+      const time = m.timestamp ? new Date(m.timestamp).toLocaleTimeString() : '';
+      return `[${time}] ${who}: ${m.content}`;
+    });
+    const text = lines.join('\n');
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `chat-transcript-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, []);
+
+  return (
+    <div className="chat-page partner-chat">
+      <header className="chat-header">
+        <div className="chat-header-content">
+          <button
+            type="button"
+            onClick={() => {
+              stopAssistantSpeech();
+              stopListening();
+              navigate('/stats');
+            }}
+            className="back-button"
+          >
+            ← Stats
+          </button>
+          <div className="header-center">
+            <h1>Chat with Emma</h1>
+            <p className="chat-subtitle">Just talk—tips show up when you end the chat.</p>
+            {isListening && (
+              <span className="listening-badge listening-badge-subtle">
+                Listening… speak naturally
+              </span>
+            )}
+          </div>
+          <div className="header-controls">
+            <button
+              type="button"
+              onClick={() => endChatSession()}
+              className="btn-danger end-chat-btn"
+              disabled={isLoading || isEndingChat}
+              title="End chat and see a short friendly summary"
+            >
+              End chat
+            </button>
+            <button
+              type="button"
+              onClick={() => setAudioEnabled(!audioEnabled)}
+              className={`toggle-button ${audioEnabled ? 'active' : ''}`}
+              title={`Sound ${audioEnabled ? 'on' : 'off'}`}
+            >
+              {audioEnabled ? '🔊' : '🔇'}
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div className="chat-container">
+        <div className="chat-messages">
+          {messages.map((message) => (
+            <div key={message.id} className={`message ${message.type}`}>
+              <div className="message-content">
+                <p>{message.content}</p>
+              </div>
+              <span className="message-time">
+                {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            </div>
+          ))}
+          
+          {isLoading && (
+            <div className="message bot">
+              <div className="message-content typing-row">
+                <div className="typing-indicator">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </div>
+                <span className="typing-label">Emma is typing…</span>
+                {retryCount > 0 && (
+                  <span className="typing-retry">Retry {retryCount + 1}</span>
+                )}
+              </div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        <form onSubmit={handleSubmit} className="chat-input-form">
+          <div className="input-group">
+            <div className="input-container">
+              <textarea
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder={isListening ? 'Listening…' : 'Type a message, or use the mic (same as typing)'}
+                className="chat-input"
+                disabled={isLoading || isEndingChat || showSessionSummary}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSubmit(e);
+                  }
+                }}
+              />
+              
+              {/* Enhanced real-time transcript display */}
+              {(isListening || transcript) && (
+                <div className="real-time-transcript enhanced">
+                  <div className="transcript-label">
+                    {isListening ? (
+                      <span className="listening-indicator">
+                        Listening… <span className="pulse-dot"></span>
+                      </span>
+                    ) : (
+                      <span>Heard:</span>
+                    )}
+                  </div>
+                  <div className="transcript-text">{transcript}</div>
+                </div>
+              )}
+            </div>
+            
+            {browserSupported && (
+              <button
+                type="button"
+                onClick={handleVoiceInput}
+                className={`voice-button enhanced ${isListening ? 'listening' : ''} ${error ? 'error' : ''}`}
+                disabled={isLoading || isEndingChat || showSessionSummary}
+                title={error ? `Speech: ${error}` : isListening ? 'Stop mic' : 'Use microphone'}
+              >
+                {isListening ? '🎙️' : '🎤'}
+                {isListening && <span className="voice-pulse"></span>}
+              </button>
+            )}
+            
+            <button
+              type="submit"
+              disabled={isLoading || !inputText.trim()}
+              className="send-button"
+            >
+              {isLoading ? '...' : 'Send'}
+            </button>
+          </div>
+          
+          {error && (
+            <div className="speech-error enhanced">
+              ⚠️ {error}
+              <button onClick={resetTranscript} className="error-reset">Try Again</button>
+            </div>
+          )}
+        </form>
+      </div>
+
+      {/* FIX #5: Session Summary Modal */}
+      {showSessionSummary && sessionSummary && (
+        <SessionSummary 
+          summary={sessionSummary}
+          onClose={handleCloseSummary}
+          onBackToDashboard={handleBackToDashboard}
+          onDownload={handleDownloadTranscript}
+        />
+      )}
+    </div>
+  );
+};
+
+// Enhanced Profile Page with Manual Level Selection
+const ProfilePage = () => {
+  const [profile, setProfile] = useState(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editData, setEditData] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [levelChangeLoading, setLevelChangeLoading] = useState(false);
+  const navigate = useNavigate();
+  const { updateUserLevel } = useAuth();
+
+  useEffect(() => {
+    const fetchProfile = async () => {
+      try {
+        const response = await axios.get('/api/user/profile');
+        setProfile(response.data);
+        setEditData({
+          fullName: response.data.full_name,
+          email: response.data.email,
+          daily_practice_time: response.data.profile?.goals?.daily_practice_time || 15,
+          weekly_vocab_target: response.data.profile?.goals?.weekly_vocab_target || 20,
+          correction_style: response.data.profile?.preferences?.correction_style || 'gentle'
+        });
+      } catch (error) {
+        console.error('Failed to fetch profile:', error);
+      }
+    };
+
+    fetchProfile();
+  }, []);
+
+  const handleSave = async () => {
+    setLoading(true);
+    try {
+      console.log('Saving profile data:', editData);
+      setIsEditing(false);
+    } catch (error) {
+      console.error('Failed to save profile:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLevelChange = async (newLevel) => {
+    if (window.confirm(`Are you sure you want to change your level to ${newLevel}? This will adjust your learning experience and disable automatic level adjustments.`)) {
+      setLevelChangeLoading(true);
+      try {
+        const result = await updateUserLevel(newLevel);
+        if (result.success) {
+          // Refresh profile data
+          const response = await axios.get('/api/user/profile');
+          setProfile(response.data);
+          alert(`Level successfully changed to ${newLevel}!`);
+        } else {
+          alert(`Failed to change level: ${result.error}`);
+        }
+      } catch (error) {
+        alert('Failed to change level. Please try again.');
+      } finally {
+        setLevelChangeLoading(false);
+      }
+    }
+  };
+
+  if (!profile) {
+    return (
+      <div className="loading-container">
+        <div className="loading-spinner"></div>
+        <p>Loading enhanced profile...</p>
+      </div>
+    );
+  }
+
+  const formatDate = (dateStr) => {
+    try {
+      return new Date(dateStr).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+    } catch {
+      return dateStr;
+    }
+  };
+
+  const proficiency = profile.profile || {};
+  const recentScores = profile.recent_scores || {};
+  const levelChangeHistory = profile.level_change_history || [];
+  const isAutoLevel = proficiency.preferences?.auto_level_adjustment !== false;
+  const awaitingAssessmentProfile = proficiency.awaiting_initial_assessment === true;
+
+  return (
+    <div className="profile-page">
+      <header className="profile-header">
+        <button onClick={() => navigate('/stats')} className="back-button">
+          ← Back to Stats
+        </button>
+        <h1>👤 Your Enhanced Profile</h1>
+      </header>
+
+      <div className="profile-content">
+        {/* Personal Information Section */}
+        <div className="profile-section">
+          <div className="section-header">
+            <h2>Personal Information</h2>
+            <button 
+              onClick={() => setIsEditing(!isEditing)}
+              className="btn-secondary"
+              disabled={loading}
+            >
+              {isEditing ? 'Cancel' : 'Edit Profile'}
+            </button>
+          </div>
+          
+          <div className="profile-info-grid">
+            <div className="info-item">
+              <strong>Full Name:</strong>
+              {isEditing ? (
+                <input
+                  type="text"
+                  value={editData.fullName}
+                  onChange={(e) => setEditData({...editData, fullName: e.target.value})}
+                  className="edit-input"
+                />
+              ) : (
+                <span>{profile.full_name}</span>
+              )}
+            </div>
+            
+            <div className="info-item">
+              <strong>Email:</strong>
+              {isEditing ? (
+                <input
+                  type="email"
+                  value={editData.email}
+                  onChange={(e) => setEditData({...editData, email: e.target.value})}
+                  className="edit-input"
+                />
+              ) : (
+                <span>{profile.email}</span>
+              )}
+            </div>
+            
+            <div className="info-item">
+              <strong>Username:</strong>
+              <span>{profile.username}</span>
+            </div>
+            
+            <div className="info-item">
+              <strong>Current Level:</strong>
+              <span className="level-badge">{proficiency.level || 'Beginner'}</span>
+              {!isAutoLevel && <span className="manual-badge">📍 Manual</span>}
+            </div>
+            
+            <div className="info-item">
+              <strong>Overall Score:</strong>
+              <span className="score-badge">
+                {awaitingAssessmentProfile ? 'Not set yet (chat once)' : `${proficiency.proficiency_score ?? 0}%`}
+              </span>
+            </div>
+            
+            <div className="info-item">
+              <strong>Member Since:</strong>
+              <span>{formatDate(profile.created_at)}</span>
+            </div>
+          </div>
+
+          {isEditing && (
+            <div className="edit-actions">
+              <button onClick={handleSave} className="btn-primary" disabled={loading}>
+                {loading ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Enhanced Manual Level Selection */}
+        <div className="profile-section">
+          <h2>🎭 Manual Level Selection (NEW!)</h2>
+          <div className="level-selection">
+            <p>Choose your learning level manually or let Emma adjust automatically based on your performance.</p>
+            
+            <div className="level-options">
+              {['beginner', 'intermediate', 'advanced', 'native'].map(level => (
+                <button
+                  key={level}
+                  onClick={() => handleLevelChange(level)}
+                  disabled={levelChangeLoading || proficiency.level === level}
+                  className={`level-option ${proficiency.level === level ? 'current' : ''}`}
+                >
+                  <span className="level-emoji">
+                    {level === 'beginner' ? '🌱' : 
+                     level === 'intermediate' ? '🌿' : 
+                     level === 'advanced' ? '🌳' : '🏆'}
+                  </span>
+                  <span className="level-name">{level.charAt(0).toUpperCase() + level.slice(1)}</span>
+                  {proficiency.level === level && <span className="current-badge">Current</span>}
+                </button>
+              ))}
+            </div>
+
+            <div className="auto-adjustment-toggle">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={isAutoLevel}
+                  onChange={async () => {
+                    // This would need to be implemented in the backend
+                    console.log('Toggle auto level adjustment');
+                  }}
+                />
+                Enable automatic level adjustments based on performance
+              </label>
+            </div>
+
+            {levelChangeHistory.length > 0 && (
+              <div className="level-history">
+                <h4>📈 Level Change History</h4>
+                <div className="history-list">
+                  {levelChangeHistory.slice(-3).reverse().map((change, idx) => (
+                    <div key={idx} className="history-item">
+                      <span className="change-date">{formatDate(change.timestamp)}</span>
+                      <span className="change-details">
+                        {change.from_level ? `${change.from_level} → ${change.to_level}` : `Set to ${change.to_level}`}
+                      </span>
+                      <span className={`change-method ${change.method}`}>
+                        {change.method === 'manual' ? '📍 Manual' : '🤖 Auto'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {levelChangeLoading && (
+              <div className="level-loading">
+                <div className="loading-spinner small"></div>
+                <span>Updating level...</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Rest of profile sections remain the same */}
+        <div className="profile-section">
+          <h2>📊 Enhanced Proficiency Breakdown</h2>
+          {/* ... existing proficiency section ... */}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const LeaderboardPage = () => {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const run = async () => {
+      try {
+        const res = await axios.get(
+          `${GAMIFICATION_BASE}/api/v1/gamification/leaderboard?scope=weekly&persona=diplomat&limit=20`,
+          { headers: authHeaders() }
+        );
+        setEntries(res.data?.entries || []);
+      } finally {
+        setLoading(false);
+      }
+    };
+    run();
+  }, []);
+
+  return (
+    <div className="dashboard">
+      <header className="dashboard-header">
+        <div className="header-content"><h1>🏆 Weekly Leaderboard</h1></div>
+        <div className="header-actions"><button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button></div>
+      </header>
+      <div className="stats-overview">
+        {loading ? <p>Loading leaderboard...</p> : entries.map((e) => (
+          <div className="leader-row" key={`${e.rank}-${e.username}`}>
+            <span>#{e.rank} {e.username}</span>
+            <span>Level {e.compositeLevel}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const FlashcardsPage = () => {
+  const [cards, setCards] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await axios.get(`${GAMIFICATION_BASE}/api/v1/gamification/flashcards/due/me?limit=20`, {
+        headers: authHeaders(),
+      });
+      setCards(res.data?.cards || []);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const review = async (mistakeId, result) => {
+    await axios.post(`${GAMIFICATION_BASE}/api/v1/gamification/flashcards/review`, { mistakeId, result }, {
+      headers: authHeaders(),
+    });
+    refresh();
+  };
+
+  return (
+    <div className="dashboard">
+      <header className="dashboard-header">
+        <div className="header-content"><h1>🃏 Flashcards</h1></div>
+        <div className="header-actions"><button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button></div>
+      </header>
+      <div className="stats-overview">
+        {loading ? <p>Loading due flashcards...</p> : cards.length === 0 ? <p>No cards due. Great work!</p> : cards.map((c) => (
+          <div className="activity-item" key={c._id} style={{ alignItems: 'stretch' }}>
+            <div style={{ flex: 1 }}>
+              <strong>{c.originalUtterance}</strong>
+              <div style={{ opacity: 0.8 }}>{c.correctedForm}</div>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn-secondary" onClick={() => review(c._id, 'incorrect')}>Again</button>
+              <button className="btn-primary" onClick={() => review(c._id, 'correct')}>Got it</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const QuizPage = () => {
+  const [questions, setQuestions] = useState([]);
+  const [answers, setAnswers] = useState({});
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const run = async () => {
+      try {
+        const res = await axios.get(
+          `${GAMIFICATION_BASE}/api/v1/gamification/quiz/questions?quizType=grammar&limit=5`,
+          { headers: authHeaders() }
+        );
+        setQuestions(res.data?.questions || []);
+      } finally {
+        setLoading(false);
+      }
+    };
+    run();
+  }, []);
+
+  const submit = async () => {
+    const payload = {
+      quizType: 'grammar',
+      answers: questions
+        .filter((q) => answers[q._id])
+        .map((q) => ({ questionId: q._id, userAnswer: answers[q._id] })),
+    };
+    const res = await axios.post(`${GAMIFICATION_BASE}/api/v1/gamification/quiz/submit`, payload, {
+      headers: authHeaders(),
+    });
+    setResult(res.data);
+  };
+
+  return (
+    <div className="dashboard">
+      <header className="dashboard-header">
+        <div className="header-content"><h1>🧠 Grammar Quiz</h1></div>
+        <div className="header-actions"><button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button></div>
+      </header>
+      <div className="stats-overview">
+        {loading ? <p>Loading questions...</p> : questions.length === 0 ? <p>No quiz questions available yet.</p> : questions.map((q, idx) => (
+          <div className="profile-section" key={q._id}>
+            <h3>Q{idx + 1}. {q.questionText}</h3>
+            <div className="action-cards">
+              {(q.options || []).map((opt) => (
+                <button
+                  key={opt}
+                  className={`btn-outline ${answers[q._id] === opt ? 'selected-option' : ''}`}
+                  onClick={() => setAnswers((prev) => ({ ...prev, [q._id]: opt }))}
+                >
+                  {opt}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+        {questions.length > 0 && <button className="btn-primary" onClick={submit}>Submit Quiz</button>}
+        {result && (
+          <div className="profile-section">
+            <h3>Result</h3>
+            <p>Score: {result.score}% | Correct: {result.correctCount} | XP: {result.xpAwarded}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// Main App Component with Enhanced Routing
+const routerFutureFlags = {
+  v7_startTransition: true,
+  v7_relativeSplatPath: true,
+};
+
+const App = () => {
+  return (
+    <Router future={routerFutureFlags}>
+      <AuthProvider>
+        <div className="App">
+          <Routes>
+            <Route path="/" element={<Navigate to="/stats" replace />} />
+            <Route path="/home" element={<LandingPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/signup" element={<SignupPage />} />
+            <Route path="/stats" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+            <Route path="/dashboard" element={<Navigate to="/stats" replace />} />
+            <Route path="/chat" element={<ProtectedRoute><ChatPage /></ProtectedRoute>} />
+            <Route path="/leaderboard" element={<ProtectedRoute><LeaderboardPage /></ProtectedRoute>} />
+            <Route path="/quiz" element={<ProtectedRoute><QuizPage /></ProtectedRoute>} />
+            <Route path="/flashcards" element={<ProtectedRoute><FlashcardsPage /></ProtectedRoute>} />
+            <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
+          </Routes>
+        </div>
+      </AuthProvider>
+    </Router>
+  );
+};
+
+export default App;
