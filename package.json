@@ -3,9 +3,8 @@
   "private": true,
   "scripts": {
     "start:frontend": "npm --prefix frontend start",
-    "start:flask": "python backend/complete_english_tutor.py",
     "start:gamification": "npm --prefix gamification-server run dev",
-    "start:all": "concurrently -n FRONTEND,FLASK,GAMIFICATION -c cyan,green,magenta \"npm run start:frontend\" \"npm run start:flask\" \"npm run start:gamification\""
+    "start:all": "concurrently -n FRONTEND,NODE -c cyan,magenta \"npm run start:frontend\" \"npm run start:gamification\""
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

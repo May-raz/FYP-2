@@ -10,3 +10,5 @@ language-tool-python
 pronouncing
 textstat
 python-dotenv
+pymongo
+bcrypt

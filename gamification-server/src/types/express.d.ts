@@ -6,5 +6,6 @@ declare module 'express-serve-static-core' {
       userId: string;
       username: string;
     };
+    tutorUser?: string;
   }
 }

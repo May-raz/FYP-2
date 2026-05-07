@@ -2,7 +2,7 @@
   "name": "fluency-engine-gamification-server",
   "version": "0.1.0",
   "private": true,
-  "description": "Fluency Engine — MongoDB models & future Express API for gamification",
+  "description": "Fluency Engine — Supabase-backed Express API for gamification",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -17,8 +17,10 @@
     "node": ">=18"
   },
   "dependencies": {
-    "dotenv": "^16.4.7",
+    "@supabase/supabase-js": "^2.56.1",
+    "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.9.5",

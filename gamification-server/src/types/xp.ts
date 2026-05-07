@@ -1,5 +1,3 @@
-import type { Types } from 'mongoose';
-
 export type XpTrack = 'fluency' | 'grammar' | 'eq';
 
 export interface SessionScores {
@@ -60,7 +58,7 @@ export interface AwardSessionXpResult {
 
 /** Minimal user fields required for XP math */
 export interface UserXpSnapshot {
-  _id: Types.ObjectId | string;
+  _id: string;
   xp: { fluency: number; grammar: number; eq: number };
   levels: UserLevelsSnapshot;
   streak: { current: number };

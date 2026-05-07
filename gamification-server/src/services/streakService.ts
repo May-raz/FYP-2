@@ -1,6 +1,6 @@
-import mongoose from 'mongoose';
-import { UserModel } from '../models/User';
+import { supabase } from '../config/supabase';
 import { utcMidnightDate, utcMidnightMs } from '../lib/utcDate';
+import type { GamerUserRow } from '../types/gamer';
 
 export interface SessionEmotionProfileInput {
   dominant: string;
@@ -73,26 +73,29 @@ export async function updateStreak(
   sessionCompleted: boolean,
   avgSessionScore: number
 ): Promise<UpdateStreakResult> {
-  if (!mongoose.isValidObjectId(userId)) {
-    throw new Error('Invalid userId');
-  }
-
-  const user = await UserModel.findById(userId);
+  const { data: user, error: userError } = await supabase
+    .from('gamer_users')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle<GamerUserRow>();
+  if (userError) throw userError;
   if (!user) {
     throw new Error('User not found');
   }
 
-  const lastRaw = user.streak.lastSessionDate;
+  const lastRaw = user.streak_last_session;
   const lastMs = lastRaw ? utcMidnightMs(new Date(lastRaw)) : null;
   const now = new Date();
-  const transition = computeStreakTransition(lastMs, now, user.streak.current);
+  const transition = computeStreakTransition(lastMs, now, user.streak_current);
 
   const current = transition.nextCurrent;
-  const longest = Math.max(user.streak.longest, current);
+  const longest = Math.max(user.streak_longest, current);
   const resilienceBonusAwarded = !!(sessionCompleted && sessionEmotionProfile.anxietyFlag);
 
   const todayDate = utcMidnightDate(now);
-  const history = user.streak.streakHistory;
+  const history = Array.isArray(user.streak_history)
+    ? [...(user.streak_history as Array<{ date: string; score: number; emotionFlag: boolean }>)]
+    : [];
   const emotionFlag = resilienceBonusAwarded;
 
   const lastHist = history.length > 0 ? history[history.length - 1]! : null;
@@ -100,19 +103,23 @@ export async function updateStreak(
     lastHist.score = avgSessionScore;
     lastHist.emotionFlag = lastHist.emotionFlag || emotionFlag;
   } else {
-    history.push({ date: todayDate, score: avgSessionScore, emotionFlag });
+    history.push({ date: todayDate.toISOString(), score: avgSessionScore, emotionFlag });
   }
 
   while (history.length > MAX_HISTORY) {
     history.shift();
   }
 
-  user.streak.current = current;
-  user.streak.longest = longest;
-  user.streak.lastSessionDate = todayDate;
-  user.markModified('streak.streakHistory');
-
-  await user.save();
+  const { error: updateError } = await supabase
+    .from('gamer_users')
+    .update({
+      streak_current: current,
+      streak_longest: longest,
+      streak_last_session: todayDate.toISOString(),
+      streak_history: history,
+    })
+    .eq('id', userId);
+  if (updateError) throw updateError;
 
   return {
     current,

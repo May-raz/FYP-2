@@ -1,16 +1,18 @@
 import 'dotenv/config';
-import { connectDatabase } from './config/db';
 import { createApp } from './app';
+import { connectDatabase } from './config/db';
 
 const port = parseInt(process.env.PORT ?? '5000', 10);
-const uri = process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017/fluency_engine';
 
 async function main(): Promise<void> {
-  try {
-    await connectDatabase(uri);
-    console.log('MongoDB connected');
-  } catch (err) {
-    console.error('MongoDB connection failed, starting API without DB:', err);
+  console.log('Mongo-only backend configured');
+  const mongoUri = (process.env.MONGO_URI ?? '').trim();
+  const mongoDbName = (process.env.MONGO_DB_NAME ?? 'english_tutor').trim();
+  if (mongoUri) {
+    await connectDatabase(mongoUri, mongoDbName);
+    console.log(`MongoDB connected (db=${mongoDbName})`);
+  } else {
+    console.warn('MONGO_URI not set; /api tutor routes will not persist users');
   }
   const app = createApp();
   app.listen(port, () => {

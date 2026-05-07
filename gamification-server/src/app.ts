@@ -1,6 +1,7 @@
 import cors from 'cors';
 import express from 'express';
-import { gamificationRouter } from './routes/gamificationRouter';
+import { gamificationMongoRouter } from './routes/gamificationMongoRouter';
+import { tutorRouter } from './routes/tutorRouter';
 
 export function createApp(): express.Express {
   const app = express();
@@ -24,7 +25,8 @@ export function createApp(): express.Express {
     res.send('Gamification server running');
   });
 
-  app.use('/api/v1/gamification', gamificationRouter);
+  app.use('/api', tutorRouter);
+  app.use('/api/v1/gamification', gamificationMongoRouter);
 
   return app;
 }

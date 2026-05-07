@@ -1,10 +1,9 @@
 import { z } from 'zod';
-import mongoose from 'mongoose';
 
-const objectIdString = z.string().refine((s) => mongoose.isValidObjectId(s), 'Invalid ObjectId');
+const idString = z.string().min(1, 'Invalid id');
 
 export const sessionCompleteSchema = z.object({
-  sessionId: objectIdString,
+  sessionId: idString,
   scores: z.object({
     fluency: z.number().min(0).max(100),
     grammar: z.number().min(0).max(100),
@@ -39,7 +38,7 @@ export const sessionCompleteSchema = z.object({
 });
 
 export const flashcardReviewSchema = z.object({
-  mistakeId: objectIdString,
+  mistakeId: idString,
   result: z.enum(['correct', 'incorrect', 'skipped']),
 });
 
@@ -51,10 +50,10 @@ export const scenarioCompleteSchema = z.object({
 
 export const quizSubmitSchema = z.object({
   quizType: z.enum(['grammar', 'emotion-recognition']),
-  sessionId: objectIdString.optional(),
+  sessionId: idString.optional(),
   answers: z.array(
     z.object({
-      questionId: objectIdString,
+      questionId: idString,
       userAnswer: z.string(),
     })
   ),

@@ -1,5 +1,4 @@
-export { connectDatabase, disconnectDatabase } from './config/db';
-export * from './models';
+export { supabase } from './config/supabase';
 export * from './constants/xp';
 export type * from './types/xp';
 export {

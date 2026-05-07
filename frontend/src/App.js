@@ -1,5 +1,5 @@
 import React, { useState, useEffect, createContext, useContext, useRef, useCallback } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import './App.css';
 import { ChatEndModal } from './components/ChatEndModal.jsx';
@@ -17,14 +17,24 @@ function pickBestEnglishVoice() {
     const n = (name || '').toLowerCase();
     const l = (lang || '').toLowerCase();
     let s = 0;
+    // Strong preference for natural-sounding female tutor voices.
+    if (n.includes('female')) s += 40;
+    if (n.includes('woman')) s += 30;
     if (n.includes('google')) s += 55;
     if (n.includes('natural') || n.includes('neural')) s += 45;
     if (n.includes('premium')) s += 35;
     if (n.includes('enhanced')) s += 25;
     if (n.includes('samantha')) s += 28;
+    if (n.includes('alloy')) s += 12;
+    if (n.includes('nova')) s += 12;
     if (n.includes('aaron')) s += 20;
     if (n.includes('aria')) s += 26;
     if (n.includes('jenny')) s += 26;
+    if (n.includes('zira')) s += 24;
+    if (n.includes('hazel')) s += 22;
+    if (n.includes('emma')) s += 32;
+    if (n.includes('female') || n.includes('samantha') || n.includes('jenny') || n.includes('aria') || n.includes('zira')) s += 20;
+    if (n.includes('male') || n.includes('guy') || n.includes('ryan') || n.includes('aaron')) s -= 10;
     if (n.includes('guy')) s += 18;
     if (n.includes('ryan')) s += 18;
     if (n.includes('ava')) s += 20;
@@ -40,15 +50,77 @@ function pickBestEnglishVoice() {
 }
 
 /** Light cleanup for Web Speech API output (spacing + leading fillers). */
+function looksLikeQuestion(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+  if (t.includes('?')) return true;
+  if (/^(what|where|why|how|who)\b/.test(t)) return true;
+  if (/^(do|does|did|is|are|was|were|can|could|will|would|should|have|has|had|may|might)\b/.test(t)) return true;
+  if (/\b(can you|could you|would you|do you think|is it|are there|should i)\b/.test(t)) return true;
+  return false;
+}
+
+function normalizeUserInputPunctuation(text) {
+  let t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  t = t.replace(/[.?!]+\s*$/, '').trim();
+  if (!t) return '';
+  if (t.length > 1) t = t.charAt(0).toUpperCase() + t.slice(1);
+  return `${t}${looksLikeQuestion(t) ? '?' : '.'}`;
+}
+
 function cleanVoiceTranscript(raw) {
   if (!raw || typeof raw !== 'string') return '';
   let t = raw.replace(/\s+/g, ' ').trim();
   t = t.replace(/\b(um|uh|erm|er|ah|hmm)\b/gi, ' ');
   t = t.replace(/[^\w\s'?.!,]/g, ' ');
   t = t.replace(/\s+/g, ' ').trim();
-  if (t && !/[.?!]$/.test(t)) t = `${t}.`;
+  if (t) {
+    t = t.replace(/[.?!]+\s*$/, '').trim();
+    t = `${t}${looksLikeQuestion(t) ? '?' : '.'}`;
+  }
   if (t.length > 1) t = t.charAt(0).toUpperCase() + t.slice(1);
   return t;
+}
+
+function normalizeSttText(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let t = raw.replace(/\s+/g, ' ').trim();
+  // Common Web Speech quirks and fast fixes
+  t = t
+    .replace(/\b(i)\b/g, 'I')
+    .replace(/\bim\b/gi, "I'm")
+    .replace(/\bdont\b/gi, "don't")
+    .replace(/\bcant\b/gi, "can't")
+    .replace(/\bwont\b/gi, "won't")
+    .replace(/\bthats\b/gi, "that's")
+    .replace(/\bwhats\b/gi, "what's")
+    .replace(/\bits\b/gi, "it's");
+  // Remove repeated stutters from interim merges (e.g. "I I I")
+  t = t.replace(/\b(\w+)(\s+\1){2,}\b/gi, '$1');
+  // Strip filler words again after merges
+  t = t.replace(/\b(um|uh|erm|er|ah|hmm|like|you know)\b/gi, ' ');
+  t = t.replace(/\s+/g, ' ').trim();
+  return t;
+}
+
+function splitIntoSpeechChunks(text) {
+  const t = String(text || '').trim();
+  if (!t) return [];
+  // Split by sentence-ish boundaries; keep punctuation.
+  const chunks = t
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.?!])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // If it's one huge chunk, split by commas/semicolons.
+  if (chunks.length === 1 && chunks[0].length > 220) {
+    return chunks[0]
+      .split(/(?<=[,;:])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return chunks;
 }
 
 function tokenizeNormalized(text) {
@@ -137,8 +209,9 @@ const _rawFlaskApi =
   (process.env.REACT_APP_FLASK_URL || process.env.REACT_APP_API_URL)
     ? String(process.env.REACT_APP_FLASK_URL || process.env.REACT_APP_API_URL).trim()
     : '';
-const API_BASE = (_rawFlaskApi || 'http://127.0.0.1:5050').replace(/\/$/, '');
+const API_BASE = (_rawFlaskApi || 'http://localhost:5001').replace(/\/$/, '');
 axios.defaults.baseURL = API_BASE;
+axios.defaults.withCredentials = true;
 const _rawGamificationApi =
   typeof process !== 'undefined' &&
   process.env &&
@@ -148,15 +221,89 @@ const _rawGamificationApi =
 const _gamiHost =
   typeof window !== 'undefined' && window.location?.hostname
     ? window.location.hostname
-    : '127.0.0.1';
+    : 'localhost';
 const GAMIFICATION_BASE = (
   _rawGamificationApi ||
-  `http://${_gamiHost}:5000`
+  `http://${_gamiHost}:5001`
 ).replace(/\/$/, '');
 console.info('API config', { flaskBase: API_BASE, gamificationBase: GAMIFICATION_BASE });
 
+const CHARACTER_STORAGE_KEY = 'selected_character_persona';
+const DEFAULT_EMMA_CHARACTER = {
+  id: 'emma',
+  name: 'Emma',
+  personaType: 'default',
+  description: 'Default supportive English tutor.',
+  stylePreview: 'Friendly and balanced',
+  avatar: '👩‍🏫',
+  challengeMode: false,
+};
+
+const CHARACTER_LIBRARY = [
+  {
+    id: 'einstein',
+    name: 'Albert Einstein',
+    personaType: 'historical',
+    description: 'Curious scientist who explains with simple analogies.',
+    stylePreview: 'Logical, curious, analogy-driven',
+    avatar: '🧠',
+  },
+  {
+    id: 'shakespeare',
+    name: 'William Shakespeare',
+    personaType: 'historical',
+    description: 'Poetic mentor to improve expressive English.',
+    stylePreview: 'Light poetic old-English flavor',
+    avatar: '🎭',
+  },
+  {
+    id: 'sherlock',
+    name: 'Sherlock Holmes',
+    personaType: 'fictional',
+    description: 'Detective-style English practice with reasoning.',
+    stylePreview: 'Analytical and deductive',
+    avatar: '🕵️',
+  },
+  {
+    id: 'elonmusk',
+    name: 'Elon Musk',
+    personaType: 'modern',
+    description: 'Future-focused tech conversation style.',
+    stylePreview: 'Startup energy and futuristic thinking',
+    avatar: '🚀',
+  },
+  {
+    id: 'mariecurie',
+    name: 'Marie Curie',
+    personaType: 'historical',
+    description: 'Calm scientific communicator for precise English.',
+    stylePreview: 'Measured, clear, scientific',
+    avatar: '🔬',
+  },
+  {
+    id: 'abrahamlincoln',
+    name: 'Abraham Lincoln',
+    personaType: 'historical',
+    description: 'Plain-spoken, persuasive conversation style.',
+    stylePreview: 'Reflective, persuasive, concise',
+    avatar: '🎩',
+  },
+];
+
+function getStoredToken() {
+  const localToken = localStorage.getItem('token')?.trim();
+  if (localToken) return localToken;
+  const sessionToken = sessionStorage.getItem('token')?.trim();
+  if (sessionToken) return sessionToken;
+  const defaultAuth = String(axios.defaults.headers.common?.Authorization || '').trim();
+  if (defaultAuth.toLowerCase().startsWith('bearer ')) {
+    return defaultAuth.slice(7).trim();
+  }
+  return '';
+}
+
 function authHeaders() {
-  const token = localStorage.getItem('token')?.trim();
+  const token = getStoredToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -189,13 +336,14 @@ const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem('token')?.trim();
+    const token = getStoredToken();
     if (token) {
       axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
       axios.get('/api/user/profile')
         .then(response => setUser(response.data))
         .catch(() => {
           localStorage.removeItem('token');
+          sessionStorage.removeItem('token');
           delete axios.defaults.headers.common['Authorization'];
         })
         .finally(() => setLoading(false));
@@ -211,6 +359,7 @@ const AuthProvider = ({ children }) => {
       const token = String(rawToken || '').trim();
 
       localStorage.setItem('token', token);
+      sessionStorage.setItem('token', token);
       axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
       setUser(user);
       
@@ -230,6 +379,7 @@ const AuthProvider = ({ children }) => {
       const token = String(rawToken || '').trim();
 
       localStorage.setItem('token', token);
+      sessionStorage.setItem('token', token);
       axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
       setUser(user);
       
@@ -244,6 +394,7 @@ const AuthProvider = ({ children }) => {
 
   const logout = () => {
     localStorage.removeItem('token');
+    sessionStorage.removeItem('token');
     delete axios.defaults.headers.common['Authorization'];
     setUser(null);
   };
@@ -292,7 +443,7 @@ const useSpeechRecognition = () => {
   const silenceTimerRef = useRef(null);
   const retryCountRef = useRef(0);
   const accumulatedFinalRef = useRef('');
-  const MIN_CONFIDENCE = 0.35;
+  const MIN_CONFIDENCE = 0.25;
   
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -336,24 +487,40 @@ const useSpeechRecognition = () => {
       let interimPiece = '';
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const res = event.results[i];
-        const piece = res[0]?.transcript ?? '';
-        const confidence = typeof res[0]?.confidence === 'number' ? res[0].confidence : 1;
+        // Choose the best alternative by confidence when available.
+        let bestTranscript = '';
+        let bestConfidence = -1;
+        const altCount = typeof res.length === 'number' ? res.length : 0;
+        for (let j = 0; j < Math.min(altCount, 5); j += 1) {
+          const alt = res[j];
+          const c = typeof alt?.confidence === 'number' ? alt.confidence : 0;
+          const tr = alt?.transcript ?? '';
+          if (tr && c >= bestConfidence) {
+            bestTranscript = tr;
+            bestConfidence = c;
+          }
+        }
+        const piece = bestTranscript || res[0]?.transcript || '';
+        const confidence =
+          bestConfidence >= 0
+            ? bestConfidence
+            : (typeof res[0]?.confidence === 'number' ? res[0].confidence : 1);
         if (res.isFinal) {
-          const t = piece.trim();
+          const t = normalizeSttText(piece).trim();
           if (t && confidence >= MIN_CONFIDENCE) {
             accumulatedFinalRef.current = accumulatedFinalRef.current
               ? `${accumulatedFinalRef.current} ${t}`
               : t;
           }
         } else if (recognition.interimResults) {
-          interimPiece += piece;
+          interimPiece += ` ${normalizeSttText(piece)}`;
         }
       }
 
       const fullTranscript = (
         accumulatedFinalRef.current + (interimPiece ? ` ${interimPiece.trim()}` : '')
       ).trim();
-      setTranscript(fullTranscript);
+      setTranscript(normalizeSttText(fullTranscript));
 
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
@@ -364,7 +531,7 @@ const useSpeechRecognition = () => {
           console.log('🔇 Pause detected, stopping listening...');
           stopListening();
         }
-      }, 2600);
+      }, 1400);
     };
 
     recognition.onend = () => {
@@ -997,7 +1164,44 @@ const DetailedProgressAnalytics = ({ onClose }) => {
       try {
         setLoading(true);
         const response = await axios.get('/api/progress/detailed-analytics');
-        setAnalyticsData(response.data);
+        const raw = response.data || {};
+        const perf = raw.performance || {};
+        const growth = raw.growth_metrics || {};
+        const activity = raw.activity_analysis || {};
+        const consistency = raw.consistency_analysis || {};
+        setAnalyticsData({
+          current_scores: {
+            pronunciation: Number(raw.current_scores?.pronunciation ?? perf.pronunciation ?? 0),
+            grammar: Number(raw.current_scores?.grammar ?? perf.grammar ?? 0),
+            fluency: Number(raw.current_scores?.fluency ?? perf.fluency ?? 0),
+            overall: Number(raw.current_scores?.overall ?? perf.overall ?? 0),
+          },
+          learning_velocity: {
+            pronunciation: Number(raw.learning_velocity?.pronunciation ?? 0),
+            grammar: Number(raw.learning_velocity?.grammar ?? 0),
+            fluency: Number(raw.learning_velocity?.fluency ?? 0),
+          },
+          improvement_rate: Number(raw.improvement_rate ?? growth.improvement_rate_per_session ?? 0),
+          total_sessions: Number(raw.total_sessions ?? activity.total_sessions ?? 0),
+          days_active: Number(raw.days_active ?? growth.days_active ?? 0),
+          level_progressions: Number(raw.level_progressions ?? growth.level_progressions ?? 0),
+          weekly_session_counts: Array.isArray(raw.weekly_session_counts)
+            ? raw.weekly_session_counts
+            : (Array.isArray(activity.weekly_session_counts) ? activity.weekly_session_counts : []),
+          problem_areas: Array.isArray(raw.problem_areas) ? raw.problem_areas : [],
+          strengths: Array.isArray(raw.strengths) ? raw.strengths : [],
+          consistency_ratings: {
+            pronunciation: String(raw.consistency_ratings?.pronunciation ?? consistency.pronunciation ?? 'Stable'),
+            grammar: String(raw.consistency_ratings?.grammar ?? consistency.grammar ?? 'Stable'),
+            fluency: String(raw.consistency_ratings?.fluency ?? consistency.fluency ?? 'Stable'),
+          },
+          milestones_achieved: Array.isArray(raw.milestones_achieved) ? raw.milestones_achieved : [],
+          predictive_insights: Array.isArray(raw.predictive_insights)
+            ? raw.predictive_insights
+            : (Array.isArray(raw.key_insights) ? raw.key_insights : []),
+          next_goals: Array.isArray(raw.next_goals) ? raw.next_goals : [],
+          analytics_summary: String(raw.analytics_summary ?? 'Analytics data loaded.'),
+        });
       } catch (err) {
         setError(err.response?.data?.error || 'Failed to load analytics');
       } finally {
@@ -1273,6 +1477,9 @@ const Dashboard = () => {
         const gamiPromise = (async () => {
           try {
             const headers = authHeaders();
+            if (!headers.Authorization) {
+              console.warn('Gamification auth header missing before request');
+            }
             const [gProfile, gStreak, gLeaderboard, gFlashcards] = await Promise.all([
               axios.get(`${GAMIFICATION_BASE}/api/v1/gamification/profile/self`, { headers, timeout: 10000 }),
               axios.get(`${GAMIFICATION_BASE}/api/v1/gamification/streak/self`, { headers, timeout: 10000 }),
@@ -1286,6 +1493,13 @@ const Dashboard = () => {
               dueCards: Array.isArray(gFlashcards.data?.cards) ? gFlashcards.data.cards.length : 0,
             };
           } catch (e) {
+            if (e?.response?.status === 401) {
+              console.warn('Gamification JWT unauthorized; forcing re-login');
+              logout();
+              navigate('/login', {
+                state: { message: 'Session expired for gamification. Please log in again.' }
+              });
+            }
             console.warn(
               'Gamification fetch warning:',
               {
@@ -1314,7 +1528,7 @@ const Dashboard = () => {
     };
 
     fetchData();
-  }, []);
+  }, [logout, navigate]);
 
   if (loading) {
     return (
@@ -1363,6 +1577,14 @@ const Dashboard = () => {
 
   const isAutoLevel = profile.profile?.preferences?.auto_level_adjustment !== false;
   const awaitingAssessment = profile.profile?.awaiting_initial_assessment === true;
+  const XP_THRESHOLDS = [0, 200, 500, 1000, 1800, 3000, 4500, 6500, 9000, 12000];
+  const compositeLevel = Number(gamification.profile?.levels?.composite ?? 1);
+  const xpPool = gamification.profile?.xp || {};
+  const compositeXp = Number(xpPool.fluency ?? 0) + Number(xpPool.grammar ?? 0) + Number(xpPool.eq ?? 0);
+  const nextLevel = Math.min(10, Math.max(1, compositeLevel + 1));
+  const nextThreshold = XP_THRESHOLDS[nextLevel - 1] ?? XP_THRESHOLDS[XP_THRESHOLDS.length - 1];
+  const xpToNext = Math.max(0, nextThreshold - compositeXp);
+  const atMaxLevel = compositeLevel >= 10;
 
   return (
     <div className="dashboard">
@@ -1382,6 +1604,20 @@ const Dashboard = () => {
           sets your starting scores and level when &quot;Let Emma decide&quot; is on.
         </div>
       )}
+      <div
+        style={{
+          margin: '0 1.25rem 1rem',
+          padding: '12px 16px',
+          borderRadius: 8,
+          background: 'rgba(34, 197, 94, 0.12)',
+          border: '1px solid rgba(34, 197, 94, 0.35)',
+          fontSize: '0.95rem',
+        }}
+      >
+        {atMaxLevel
+          ? `🏆 You are at max level (Level ${compositeLevel}).`
+          : `⭐ Level ${compositeLevel}: ${xpToNext} XP needed to reach Level ${nextLevel}. (Current XP: ${compositeXp})`}
+      </div>
       <header className="dashboard-header">
         <div className="header-content">
           <h1>Welcome back, {profile.full_name}! {levelEmojis[proficiency.current_level] || '👋'}</h1>
@@ -1531,6 +1767,11 @@ const Dashboard = () => {
               <div className="action-icon">🎯</div>
               <h3>Enhanced Chat with Emma</h3>
               <p>Get real-time phoneme-level pronunciation, grammar, and fluency feedback</p>
+            </div>
+            <div className="action-card primary" onClick={() => navigate('/characters')}>
+              <div className="action-icon">🏛️</div>
+              <h3>Talk to Historical Persons</h3>
+              <p>Practice English with Einstein, Shakespeare, Sherlock, Curie, Lincoln, and more</p>
             </div>
             <div className="action-card" onClick={() => setShowAdvancedAssessment(true)}>
               <div className="action-icon">📊</div>
@@ -1730,15 +1971,166 @@ const ChatPage = () => {
   const [isEndingChat, setIsEndingChat] = useState(false);
   const [sessionSummary, setSessionSummary] = useState(null);
   const [showSessionSummary, setShowSessionSummary] = useState(false);
+  const [streamingBotText, setStreamingBotText] = useState('');
+  const [liveAnalysis, setLiveAnalysis] = useState(null);
+  const [isAnalyzingLive, setIsAnalyzingLive] = useState(false);
+  const [emotionState, setEmotionState] = useState(null);
   const navigate = useNavigate();
+  const location = useLocation();
+  const isHistoricalMode = location.pathname.startsWith('/chat/character');
   const messagesEndRef = useRef(null);
   const preferredVoiceRef = useRef(null);
+  const ttsQueueRef = useRef([]);
+  const ttsSpeakingRef = useRef(false);
+  const ttsGenerationRef = useRef(0);
   const isListeningRef = useRef(false);
   const messagesRef = useRef([]);
   const retryCountRef = useRef(0);
   const sessionStartRef = useRef(Date.now());
+  const typingStartRef = useRef(0);
+  const lastKeyTsRef = useRef(0);
+  const keyPauseSumRef = useRef(0);
+  const keyPauseCountRef = useRef(0);
+  const backspaceCountRef = useRef(0);
+  const voiceStartRef = useRef(0);
+  const voiceSilenceMsRef = useRef(0);
+  const activeSessionIdRef = useRef(
+    (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.round(Math.random() * 1e9)}`
+  );
+  const [selectedCharacter, setSelectedCharacter] = useState(() => {
+    if (!location.pathname.startsWith('/chat/character')) {
+      return DEFAULT_EMMA_CHARACTER;
+    }
+    const fromRoute = location.state?.selectedCharacter;
+    if (fromRoute?.id) return { ...fromRoute, challengeMode: Boolean(fromRoute.challengeMode) };
+    try {
+      const stored = JSON.parse(localStorage.getItem(CHARACTER_STORAGE_KEY) || 'null');
+      if (stored?.id) return { ...stored, challengeMode: Boolean(stored.challengeMode) };
+    } catch (_) {
+      // ignore parse errors
+    }
+    return DEFAULT_EMMA_CHARACTER;
+  });
 
   const { logout } = useAuth();
+
+  useEffect(() => {
+    if (!isHistoricalMode) {
+      setSelectedCharacter(DEFAULT_EMMA_CHARACTER);
+      return;
+    }
+    if (location.state?.selectedCharacter?.id) {
+      setSelectedCharacter({
+        ...location.state.selectedCharacter,
+        challengeMode: Boolean(location.state.selectedCharacter.challengeMode),
+      });
+    }
+  }, [isHistoricalMode, location.state]);
+
+  useEffect(() => {
+    if (!isHistoricalMode) return;
+    localStorage.setItem(CHARACTER_STORAGE_KEY, JSON.stringify(selectedCharacter));
+  }, [isHistoricalMode, selectedCharacter]);
+
+  const buildSessionMistakes = useCallback((msgs) => {
+    const out = [];
+    for (const m of msgs || []) {
+      if (m.type !== 'user') continue;
+      const raw = String(m.content || '').trim();
+      if (!raw) continue;
+      let corrected = raw;
+      if (/^[a-z]/.test(corrected)) corrected = corrected.charAt(0).toUpperCase() + corrected.slice(1);
+      corrected = corrected.replace(/\bi\b/g, 'I');
+      corrected = corrected.replace(/[.?!]+\s*$/, '').trim();
+      if (corrected) corrected = `${corrected}${looksLikeQuestion(corrected) ? '?' : '.'}`;
+      if (corrected !== raw) {
+        out.push({
+          originalUtterance: raw,
+          correctedForm: corrected,
+          errorType: 'grammar',
+          errorTag: 'chat_auto_correction',
+        });
+      }
+      if (out.length >= 5) break;
+    }
+    if (out.length === 0) {
+      const firstUser = (msgs || []).find((m) => m.type === 'user' && String(m.content || '').trim());
+      if (firstUser) {
+        const text = String(firstUser.content || '').trim();
+        out.push({
+          originalUtterance: text,
+          correctedForm: (() => {
+            const normalized = String(text || '').replace(/[.?!]+\s*$/, '').trim();
+            if (!normalized) return text;
+            return `${normalized}${looksLikeQuestion(normalized) ? '?' : '.'}`;
+          })(),
+          errorType: 'grammar',
+          errorTag: 'chat_memory_seed',
+        });
+      }
+    }
+    return out;
+  }, []);
+
+  const syncGamificationForSession = useCallback(async (msgs, emotionTrend) => {
+    try {
+      const userTurns = (msgs || []).filter((m) => m.type === 'user').length;
+      if (!userTurns) return;
+
+      const dominant = (emotionTrend || [])
+        .slice()
+        .sort((a, b) => (b.count || 0) - (a.count || 0))[0]?.label || 'neutral';
+      const anxietyFlag = dominant === 'sad' || dominant === 'angry';
+      const sessionId =
+        (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+
+      // Reuse real profile metrics so gamification progression reflects current learner state.
+      let scores = { fluency: 70, grammar: 70, eq: 70 };
+      try {
+        const statsRes = await axios.get('/api/user/stats', { timeout: 10000 });
+        const proficiency = statsRes.data?.proficiency || {};
+        scores = {
+          fluency: Number(proficiency.fluency_score ?? 70),
+          grammar: Number(proficiency.grammar_score ?? 70),
+          eq: Number(proficiency.overall_score ?? 70),
+        };
+      } catch (e) {
+        console.warn('Could not load stats for gamification sync, using fallback scores');
+      }
+
+      const headers = authHeaders();
+      await axios.post(
+        `${GAMIFICATION_BASE}/api/v1/gamification/session/complete`,
+        {
+          sessionId,
+          scores,
+          turnCount: userTurns,
+          emotionProfile: { dominant, anxietyFlag },
+          sessionCompleted: true,
+          mistakes: buildSessionMistakes(msgs),
+        },
+        { headers, timeout: 12000 }
+      );
+    } catch (err) {
+      console.warn('Gamification session sync failed, attempting micro-session fallback', err);
+      try {
+        const dominant = (emotionTrend || [])
+          .slice()
+          .sort((a, b) => (b.count || 0) - (a.count || 0))[0]?.label || 'neutral';
+        await axios.post(
+          `${GAMIFICATION_BASE}/api/v1/gamification/micro-session`,
+          { emotionProfile: { dominant, anxietyFlag: dominant === 'sad' || dominant === 'angry' } },
+          { headers: authHeaders(), timeout: 10000 }
+        );
+      } catch (fallbackErr) {
+        console.warn('Gamification micro-session fallback failed', fallbackErr);
+      }
+    }
+  }, [buildSessionMistakes]);
 
   // Enhanced speech recognition
   const { 
@@ -1753,7 +2145,16 @@ const ChatPage = () => {
 
   useEffect(() => {
     isListeningRef.current = isListening;
-  }, [isListening]);
+    if (isListening) {
+      voiceStartRef.current = Date.now();
+    } else if (voiceStartRef.current) {
+      const speechDuration = Math.max(0, Date.now() - voiceStartRef.current);
+      if (speechDuration > 0 && !String(transcript || '').trim()) {
+        voiceSilenceMsRef.current += Math.min(2000, speechDuration);
+      }
+      voiceStartRef.current = 0;
+    }
+  }, [isListening, transcript]);
 
   useEffect(() => {
     const refreshVoice = () => {
@@ -1814,35 +2215,69 @@ const ChatPage = () => {
   }, [messages]);
 
   const stopAssistantSpeech = () => {
+    ttsGenerationRef.current += 1;
+    ttsQueueRef.current = [];
+    ttsSpeakingRef.current = false;
     try {
       window.speechSynthesis?.cancel();
     } catch (_) { /* ignore */ }
   };
 
-  // TTS: best available English voice, slightly slower rate for a more natural read
+  // TTS: best available English voice, chunked, less robotic pacing.
   const speakText = useCallback((text) => {
     if (!audioEnabled || !('speechSynthesis' in window)) return;
 
     try {
       window.speechSynthesis.cancel();
+      const generation = ttsGenerationRef.current + 1;
+      ttsGenerationRef.current = generation;
 
-      const utterance = new SpeechSynthesisUtterance(text);
-      const v = preferredVoiceRef.current;
-      if (v) {
-        utterance.voice = v;
-        utterance.lang = v.lang || 'en-US';
-      } else {
-        utterance.lang = 'en-US';
-      }
-      utterance.rate = 0.92;
-      utterance.pitch = 1.0;
-      utterance.volume = 1.0;
+      const chunks = splitIntoSpeechChunks(text);
+      if (!chunks.length) return;
+      ttsQueueRef.current = chunks;
+      ttsSpeakingRef.current = false;
 
-      utterance.onerror = (e) => {
-        console.warn('TTS Error:', e.error);
+      const speakNext = () => {
+        if (!audioEnabled || ttsGenerationRef.current !== generation) return;
+        const next = ttsQueueRef.current.shift();
+        if (!next) {
+          ttsSpeakingRef.current = false;
+          return;
+        }
+        ttsSpeakingRef.current = true;
+        const utterance = new SpeechSynthesisUtterance(next);
+        const v = preferredVoiceRef.current;
+        if (v) {
+          utterance.voice = v;
+          utterance.lang = v.lang || 'en-US';
+        } else {
+          utterance.lang = 'en-US';
+        }
+        // Slightly faster than before; chunking creates natural pauses.
+        utterance.rate = 0.98;
+        utterance.pitch = next.trim().endsWith('?') ? 1.06 : 1.02;
+        utterance.volume = 1.0;
+
+        utterance.onend = () => {
+          if (ttsGenerationRef.current !== generation) return;
+          // Small gap between chunks feels more human.
+          setTimeout(speakNext, 120);
+        };
+        utterance.onerror = (e) => {
+          if (ttsGenerationRef.current !== generation) return;
+          const errCode = String(e?.error || '').toLowerCase();
+          // "interrupted"/"canceled" is expected when we intentionally stop speech.
+          if (errCode === 'interrupted' || errCode === 'canceled' || errCode === 'cancelled') {
+            return;
+          }
+          console.warn('TTS Error:', e.error);
+          // Skip this chunk and continue.
+          setTimeout(speakNext, 50);
+        };
+        window.speechSynthesis.speak(utterance);
       };
 
-      window.speechSynthesis.speak(utterance);
+      speakNext();
     } catch (err) {
       console.warn('TTS not available:', err);
     }
@@ -1867,6 +2302,24 @@ const ChatPage = () => {
     return newMessage;
   }, []);
 
+  const runLiveAnalysis = useCallback(async (message, botReply = '') => {
+    const text = String(message || '').trim();
+    if (!text) return;
+    setIsAnalyzingLive(true);
+    try {
+      const response = await axios.post(
+        '/api/chat/partner/live-analysis',
+        { message: text, bot_reply: String(botReply || '') },
+        { timeout: 12000 }
+      );
+      setLiveAnalysis(response.data || null);
+    } catch (err) {
+      console.warn('Live analysis unavailable', err);
+    } finally {
+      setIsAnalyzingLive(false);
+    }
+  }, []);
+
   const endChatSession = useCallback(async (optionalMessages) => {
     stopAssistantSpeech();
     stopListening();
@@ -1887,6 +2340,7 @@ const ChatPage = () => {
         { messages: msgs },
         { timeout: 90000 }
       );
+      await syncGamificationForSession(msgs, emotionTrend);
       const elapsedMs = Math.max(0, Date.now() - sessionStartRef.current);
       const mins = Math.floor(elapsedMs / 60000);
       const secs = Math.floor((elapsedMs % 60000) / 1000);
@@ -1913,10 +2367,10 @@ const ChatPage = () => {
       setIsLoading(false);
       setIsEndingChat(false);
     }
-  }, [navigate]);
+  }, [navigate, syncGamificationForSession]);
 
   const sendMessage = useCallback(async (text) => {
-    const trimmed = (text || '').trim();
+    const trimmed = normalizeUserInputPunctuation(text);
     if (!trimmed) return;
 
     const endIntent = detectEndIntent(trimmed);
@@ -1945,21 +2399,136 @@ const ChatPage = () => {
     addMessage(trimmed, 'user');
     setIsLoading(true);
     setInputText('');
+    const sendTs = Date.now();
+    const typingDurationMs = typingStartRef.current ? Math.max(0, sendTs - typingStartRef.current) : 0;
+    const avgPauseMs = keyPauseCountRef.current > 0 ? Math.round(keyPauseSumRef.current / keyPauseCountRef.current) : 0;
+    const typingMetrics = {
+      typingStartTs: typingStartRef.current || sendTs,
+      sendTs,
+      typingDurationMs,
+      backspaceCount: backspaceCountRef.current,
+      messageLength: trimmed.length,
+      avgPauseMs,
+    };
+    const words = trimmed.split(/\s+/).filter(Boolean).length;
+    const speechDurationMs = voiceStartRef.current ? Math.max(0, sendTs - voiceStartRef.current) : 0;
+    const voiceMetrics = {
+      speechDurationMs,
+      silenceDurationMs: voiceSilenceMsRef.current,
+      wordsPerMinute: speechDurationMs > 0 ? Math.round((words / (speechDurationMs / 60000)) * 10) / 10 : 0,
+      fillerCount: (trimmed.match(/\b(um|uh|like|actually)\b/gi) || []).length,
+    };
 
     try {
-      const response = await axios.post(
-        '/api/chat/partner',
-        { message: trimmed },
-        { timeout: 45000 }
-      );
+      let botResponse = '';
+      const token = getStoredToken();
+      if (!token) {
+        console.warn('Missing token before stream call; forcing re-login.');
+        logout();
+        navigate('/login', { state: { message: 'Session missing. Please log in again.' } });
+        return;
+      }
+      const streamResp = await fetch(`${API_BASE || ''}/api/chat/partner/stream`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          message: trimmed,
+          typingMetrics,
+          voiceMetrics,
+          emotionEnabled: true,
+          sessionId: activeSessionIdRef.current,
+          characterMode: isHistoricalMode && selectedCharacter?.id && selectedCharacter.id !== 'emma',
+          characterId: isHistoricalMode ? selectedCharacter?.id : undefined,
+          challengeMode: isHistoricalMode ? Boolean(selectedCharacter?.challengeMode) : false,
+          personaType: isHistoricalMode ? selectedCharacter?.personaType : 'default',
+        }),
+      });
+      if (streamResp.status === 401) {
+        const body = await streamResp.text().catch(() => '');
+        console.error('Stream auth failed (401):', body || 'No response body');
+        logout();
+        navigate('/login', { state: { message: 'Session expired. Please log in again.' } });
+        return;
+      }
+      if (!streamResp.ok || !streamResp.body) {
+        const body = await streamResp.text().catch(() => '');
+        throw new Error(`Streaming failed: ${streamResp.status} ${body}`);
+      }
 
-      const botResponse = (response.data.response || '').trim();
+      const reader = streamResp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+        for (const evt of events) {
+          const line = evt.split('\n').find((l) => l.startsWith('data: '));
+          if (!line) continue;
+          try {
+            const payload = JSON.parse(line.slice(6));
+            if (payload?.text) {
+              botResponse = String(payload.text);
+              setStreamingBotText(botResponse);
+            }
+            if (payload?.final && payload?.response) {
+              botResponse = String(payload.response);
+              if (payload?.emotionState) {
+                setEmotionState({
+                  confidence: Number(payload.emotionState.confidence ?? 0),
+                  nervousness: Number(payload.emotionState.nervousness ?? 0),
+                  frustration: Number(payload.emotionState.frustration ?? 0),
+                  engagement: Number(payload.emotionState.engagement ?? 0),
+                });
+              }
+              if (payload?.activeCharacter?.id) {
+                setSelectedCharacter((prev) => ({ ...prev, ...payload.activeCharacter }));
+              }
+              if (payload?.sessionId) {
+                activeSessionIdRef.current = String(payload.sessionId);
+              }
+            }
+          } catch (_) {
+            // Ignore malformed chunks.
+          }
+        }
+      }
+      setStreamingBotText('');
+
       if (!botResponse || botResponse.length < 1) {
         throw new Error('Empty reply');
       }
 
       addMessage(botResponse, 'bot');
+      runLiveAnalysis(trimmed, botResponse).catch(() => {});
       setRetryCount(0);
+
+      const nextMsgs = [...messagesRef.current, {
+        id: Date.now() + Math.random(),
+        type: 'bot',
+        content: botResponse,
+        timestamp: new Date(),
+      }];
+      const userTurns = nextMsgs.filter((m) => m.type === 'user').length;
+      if (userTurns > 0 && userTurns % 3 === 0) {
+        const trend = buildEmotionTrend(nextMsgs);
+        syncGamificationForSession(nextMsgs, trend).catch((e) => {
+          console.warn('Background gamification sync skipped', e);
+        });
+      } else {
+        axios.post(
+          `${GAMIFICATION_BASE}/api/v1/gamification/micro-session`,
+          { emotionProfile: { dominant: inferMessageEmotion(trimmed), anxietyFlag: false } },
+          { headers: authHeaders(), timeout: 8000 }
+        ).catch(() => {});
+      }
 
       setTimeout(() => {
         if (!isListeningRef.current) {
@@ -1967,6 +2536,7 @@ const ChatPage = () => {
         }
       }, 250);
     } catch (error) {
+      setStreamingBotText('');
       console.error('Chat error:', error);
       if (
         retryCountRef.current < 2 &&
@@ -1986,9 +2556,15 @@ const ChatPage = () => {
         setRetryCount(0);
       }
     } finally {
+      typingStartRef.current = 0;
+      lastKeyTsRef.current = 0;
+      keyPauseSumRef.current = 0;
+      keyPauseCountRef.current = 0;
+      backspaceCountRef.current = 0;
+      voiceSilenceMsRef.current = 0;
       setIsLoading(false);
     }
-  }, [addMessage, endChatSession, speakText]);
+  }, [addMessage, endChatSession, isHistoricalMode, logout, navigate, runLiveAnalysis, selectedCharacter, speakText, syncGamificationForSession]);
 
   useEffect(() => {
     if (transcript && !isListening) {
@@ -2074,8 +2650,13 @@ const ChatPage = () => {
             ← Stats
           </button>
           <div className="header-center">
-            <h1>Chat with Emma</h1>
+            <h1>{isHistoricalMode ? `Chat with ${selectedCharacter?.name || 'Character'}` : 'Chat with Emma'}</h1>
             <p className="chat-subtitle">Just talk—tips show up when you end the chat.</p>
+            <p className="chat-subtitle">
+              {isHistoricalMode
+                ? `${selectedCharacter?.avatar || '🎭'} ${selectedCharacter?.stylePreview || 'Character tutor style'}`
+                : '👩‍🏫 Friendly and balanced tutor style'}
+            </p>
             {isListening && (
               <span className="listening-badge listening-badge-subtle">
                 Listening… speak naturally
@@ -2092,6 +2673,26 @@ const ChatPage = () => {
             >
               End chat
             </button>
+            {isHistoricalMode && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => navigate('/characters')}
+                  className="btn-secondary"
+                  title="Switch historical character"
+                >
+                  Switch Character
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedCharacter((prev) => ({ ...prev, challengeMode: !prev?.challengeMode }))}
+                  className={`btn-secondary ${selectedCharacter?.challengeMode ? 'active' : ''}`}
+                  title="Character challenge mode"
+                >
+                  {selectedCharacter?.challengeMode ? 'Challenge: On' : 'Challenge: Off'}
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => setAudioEnabled(!audioEnabled)}
@@ -2105,34 +2706,112 @@ const ChatPage = () => {
       </header>
 
       <div className="chat-container">
-        <div className="chat-messages">
-          {messages.map((message) => (
-            <div key={message.id} className={`message ${message.type}`}>
-              <div className="message-content">
-                <p>{message.content}</p>
-              </div>
-              <span className="message-time">
-                {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </span>
-            </div>
-          ))}
-          
-          {isLoading && (
-            <div className="message bot">
-              <div className="message-content typing-row">
-                <div className="typing-indicator">
-                  <span></span>
-                  <span></span>
-                  <span></span>
+        <div className="chat-main-layout">
+          <div className="chat-main-column">
+            <div className="chat-messages">
+              {messages.map((message) => (
+                <div key={message.id} className={`message ${message.type}`}>
+                  <div className="message-content">
+                    <p>{message.content}</p>
+                  </div>
+                  <span className="message-time">
+                    {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
                 </div>
-                <span className="typing-label">Emma is typing…</span>
-                {retryCount > 0 && (
-                  <span className="typing-retry">Retry {retryCount + 1}</span>
-                )}
-              </div>
+              ))}
+              
+              {isLoading && (
+                <div className="message bot">
+                  <div className="message-content typing-row">
+                    <div className="typing-indicator">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </div>
+                    <span className="typing-label">Emma is typing…</span>
+                    {retryCount > 0 && (
+                      <span className="typing-retry">Retry {retryCount + 1}</span>
+                    )}
+                  </div>
+                </div>
+              )}
+              {streamingBotText && (
+                <div className="message bot">
+                  <div className="message-content">
+                    <p>{streamingBotText}</p>
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
             </div>
-          )}
-          <div ref={messagesEndRef} />
+          </div>
+
+          <aside className="chat-analysis-sidebar">
+            <div className="chat-analysis-header">
+              <h3>Live Analysis</h3>
+              {isAnalyzingLive && <span className="chat-analysis-status">Observing…</span>}
+            </div>
+            {!liveAnalysis ? (
+              <div className="chat-analysis-content">
+                <p className="chat-analysis-empty">
+                  Send a message and Emma will keep chatting while Groq/Grok silently analyzes your conversation.
+                </p>
+                <div className="analysis-list-block">
+                  <h4>Emotion Panel</h4>
+                  {[
+                    ['Confidence', emotionState?.confidence, 'good'],
+                    ['Nervousness', emotionState?.nervousness, (emotionState?.nervousness ?? 0) > 60 ? 'bad' : 'neutral'],
+                    ['Frustration', emotionState?.frustration, (emotionState?.frustration ?? 0) > 60 ? 'bad' : 'neutral'],
+                    ['Engagement', emotionState?.engagement, (emotionState?.engagement ?? 100) < 40 ? 'bad' : 'good'],
+                  ].map(([label, value, cls]) => (
+                    <div key={label} className="emotion-row">
+                      <span>{label}</span>
+                      <span className={`emotion-pill ${cls}`}>{typeof value === 'number' ? `${value}%` : '--'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="chat-analysis-content">
+                <p className="chat-analysis-summary">{liveAnalysis.summary}</p>
+                <div className="chat-analysis-meta">
+                  <span className="analysis-pill">{`Tone: ${liveAnalysis.tone || 'neutral'}`}</span>
+                  <span className="analysis-pill">{`Intent: ${liveAnalysis.intent || 'conversation'}`}</span>
+                  <span className="analysis-pill">{`Confidence: ${Math.round(Number(liveAnalysis.confidence || 0) * 100)}%`}</span>
+                </div>
+                <div className="analysis-list-block">
+                  <h4>Strengths</h4>
+                  <ul>
+                    {(liveAnalysis.strengths || []).map((item, idx) => <li key={`strength-${idx}`}>{item}</li>)}
+                  </ul>
+                </div>
+                <div className="analysis-list-block">
+                  <h4>Next Improvements</h4>
+                  <ul>
+                    {(liveAnalysis.improvements || []).map((item, idx) => <li key={`improve-${idx}`}>{item}</li>)}
+                  </ul>
+                </div>
+                <div className="analysis-list-block">
+                  <h4>Suggested Next Line</h4>
+                  <p className="suggested-reply">{liveAnalysis.suggested_reply}</p>
+                </div>
+                <div className="analysis-list-block">
+                  <h4>Emotion Panel</h4>
+                  {[
+                    ['Confidence', emotionState?.confidence, 'good'],
+                    ['Nervousness', emotionState?.nervousness, (emotionState?.nervousness ?? 0) > 60 ? 'bad' : 'neutral'],
+                    ['Frustration', emotionState?.frustration, (emotionState?.frustration ?? 0) > 60 ? 'bad' : 'neutral'],
+                    ['Engagement', emotionState?.engagement, (emotionState?.engagement ?? 100) < 40 ? 'bad' : 'good'],
+                  ].map(([label, value, cls]) => (
+                    <div key={label} className="emotion-row">
+                      <span>{label}</span>
+                      <span className={`emotion-pill ${cls}`}>{typeof value === 'number' ? `${value}%` : '--'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </aside>
         </div>
 
         <form onSubmit={handleSubmit} className="chat-input-form">
@@ -2140,11 +2819,23 @@ const ChatPage = () => {
             <div className="input-container">
               <textarea
                 value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
+                onChange={(e) => {
+                  if (!typingStartRef.current) typingStartRef.current = Date.now();
+                  const now = Date.now();
+                  if (lastKeyTsRef.current) {
+                    keyPauseSumRef.current += Math.max(0, now - lastKeyTsRef.current);
+                    keyPauseCountRef.current += 1;
+                  }
+                  lastKeyTsRef.current = now;
+                  setInputText(e.target.value);
+                }}
                 placeholder={isListening ? 'Listening…' : 'Type a message, or use the mic (same as typing)'}
                 className="chat-input"
                 disabled={isLoading || isEndingChat || showSessionSummary}
                 onKeyDown={(e) => {
+                  if (e.key === 'Backspace') {
+                    backspaceCountRef.current += 1;
+                  }
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     handleSubmit(e);
@@ -2209,6 +2900,66 @@ const ChatPage = () => {
           onDownload={handleDownloadTranscript}
         />
       )}
+    </div>
+  );
+};
+
+const HistoricalCharactersPage = () => {
+  const navigate = useNavigate();
+  const [characters, setCharacters] = useState(CHARACTER_LIBRARY);
+
+  useEffect(() => {
+    const loadCharacters = async () => {
+      try {
+        const res = await axios.get('/api/chat/characters');
+        const remote = Array.isArray(res.data?.characters) ? res.data.characters : [];
+        if (remote.length > 0) {
+          setCharacters(remote);
+        }
+      } catch (_) {
+        // keep local fallback
+      }
+    };
+    loadCharacters();
+  }, []);
+
+  const startChat = (character) => {
+    const selected = {
+      id: character.id,
+      name: character.name,
+      personaType: character.personaType || 'historical',
+      description: character.description,
+      stylePreview: character.stylePreview || character.style || '',
+      avatar: character.avatar || '🎭',
+      challengeMode: false,
+    };
+    localStorage.setItem(CHARACTER_STORAGE_KEY, JSON.stringify(selected));
+    navigate('/chat/character', { state: { selectedCharacter: selected } });
+  };
+
+  return (
+    <div className="dashboard">
+      <header className="dashboard-header">
+        <div className="header-content">
+          <h1>🏛️ Speak with Characters</h1>
+          <p>Practice English with historical and fictional personas.</p>
+        </div>
+        <div className="header-actions">
+          <button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button>
+        </div>
+      </header>
+
+      <div className="action-cards">
+        {characters.map((character) => (
+          <div key={character.id} className="action-card">
+            <div className="action-icon">{character.avatar || '🎭'}</div>
+            <h3>{character.name}</h3>
+            <p>{character.description}</p>
+            <p><strong>Style:</strong> {character.stylePreview || character.style}</p>
+            <button className="btn-primary" onClick={() => startChat(character)}>Start Chat</button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 };
@@ -2523,10 +3274,15 @@ const FlashcardsPage = () => {
   useEffect(() => { refresh(); }, [refresh]);
 
   const review = async (mistakeId, result) => {
-    await axios.post(`${GAMIFICATION_BASE}/api/v1/gamification/flashcards/review`, { mistakeId, result }, {
-      headers: authHeaders(),
-    });
-    refresh();
+    try {
+      await axios.post(`${GAMIFICATION_BASE}/api/v1/gamification/flashcards/review`, { mistakeId, result }, {
+        headers: authHeaders(),
+      });
+      refresh();
+    } catch (err) {
+      console.error('Flashcard review failed:', err);
+      alert('Could not save flashcard review right now. Please try again.');
+    }
   };
 
   return (
@@ -2576,16 +3332,32 @@ const QuizPage = () => {
   }, []);
 
   const submit = async () => {
+    const normalizedAnswers = questions
+      .map((q) => {
+        const qid = q?.id || q?._id;
+        return qid ? { qid, userAnswer: answers[qid] } : null;
+      })
+      .filter((x) => x && x.userAnswer);
+
+    if (normalizedAnswers.length === 0) {
+      alert('Please answer at least one question before submitting.');
+      return;
+    }
+
     const payload = {
       quizType: 'grammar',
-      answers: questions
-        .filter((q) => answers[q._id])
-        .map((q) => ({ questionId: q._id, userAnswer: answers[q._id] })),
+      answers: normalizedAnswers.map((x) => ({ questionId: x.qid, userAnswer: x.userAnswer })),
     };
-    const res = await axios.post(`${GAMIFICATION_BASE}/api/v1/gamification/quiz/submit`, payload, {
-      headers: authHeaders(),
-    });
-    setResult(res.data);
+    try {
+      const res = await axios.post(`${GAMIFICATION_BASE}/api/v1/gamification/quiz/submit`, payload, {
+        headers: authHeaders(),
+      });
+      setResult(res.data);
+    } catch (err) {
+      const msg = err?.response?.data?.error || err?.message || 'Quiz submission failed';
+      console.error('Quiz submit failed:', err?.response?.data || err);
+      alert(msg);
+    }
   };
 
   return (
@@ -2595,27 +3367,54 @@ const QuizPage = () => {
         <div className="header-actions"><button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button></div>
       </header>
       <div className="stats-overview">
-        {loading ? <p>Loading questions...</p> : questions.length === 0 ? <p>No quiz questions available yet.</p> : questions.map((q, idx) => (
-          <div className="profile-section" key={q._id}>
+        {loading ? <p>Loading questions...</p> : questions.length === 0 ? <p>No quiz questions available yet.</p> : questions.map((q, idx) => {
+          const qid = q?.id || q?._id || `${idx}`;
+          return (
+          <div className="profile-section" key={qid}>
             <h3>Q{idx + 1}. {q.questionText}</h3>
             <div className="action-cards">
               {(q.options || []).map((opt) => (
                 <button
                   key={opt}
-                  className={`btn-outline ${answers[q._id] === opt ? 'selected-option' : ''}`}
-                  onClick={() => setAnswers((prev) => ({ ...prev, [q._id]: opt }))}
+                  className={`btn-outline ${answers[qid] === opt ? 'selected-option' : ''}`}
+                  onClick={() => setAnswers((prev) => ({ ...prev, [qid]: opt }))}
                 >
                   {opt}
                 </button>
               ))}
             </div>
           </div>
-        ))}
+        )})}
         {questions.length > 0 && <button className="btn-primary" onClick={submit}>Submit Quiz</button>}
         {result && (
           <div className="profile-section">
             <h3>Result</h3>
             <p>Score: {result.score}% | Correct: {result.correctCount} | XP: {result.xpAwarded}</p>
+            {Array.isArray(result.graded) && result.graded.length > 0 && (
+              <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
+                {result.graded.map((g, idx) => (
+                  <div
+                    key={`${g.questionId}-${idx}`}
+                    style={{
+                      border: '1px solid var(--border-color-light)',
+                      borderRadius: 10,
+                      padding: '10px 12px',
+                      background: g.correct ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)',
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                      {`Q${idx + 1}: ${g.questionText || 'Question'}`}
+                    </div>
+                    <div>{`Your answer: ${g.userAnswer}`}</div>
+                    <div>{`Correct answer: ${g.correctAnswer}`}</div>
+                    <div style={{ fontWeight: 700 }}>{g.correct ? '✅ Correct' : '❌ Incorrect'}</div>
+                    {!g.correct && g.explanation ? (
+                      <div style={{ opacity: 0.85 }}>{`Why: ${g.explanation}`}</div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -2642,6 +3441,8 @@ const App = () => {
             <Route path="/stats" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
             <Route path="/dashboard" element={<Navigate to="/stats" replace />} />
             <Route path="/chat" element={<ProtectedRoute><ChatPage /></ProtectedRoute>} />
+            <Route path="/chat/character" element={<ProtectedRoute><ChatPage /></ProtectedRoute>} />
+            <Route path="/characters" element={<ProtectedRoute><HistoricalCharactersPage /></ProtectedRoute>} />
             <Route path="/leaderboard" element={<ProtectedRoute><LeaderboardPage /></ProtectedRoute>} />
             <Route path="/quiz" element={<ProtectedRoute><QuizPage /></ProtectedRoute>} />
             <Route path="/flashcards" element={<ProtectedRoute><FlashcardsPage /></ProtectedRoute>} />

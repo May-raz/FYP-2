@@ -1,6 +1,5 @@
-import mongoose from 'mongoose';
 import { XP_REWARDS, XP_THRESHOLDS } from '../constants/xp';
-import { UserModel } from '../models/User';
+import { supabase } from '../config/supabase';
 import type {
   AwardSessionXpInput,
   AwardSessionXpResult,
@@ -9,6 +8,7 @@ import type {
   UserXpSnapshot,
   XpTrack,
 } from '../types/xp';
+import type { GamerUserRow } from '../types/gamer';
 
 function clamp01(n: number): number {
   if (Number.isNaN(n) || !Number.isFinite(n)) return 0;
@@ -183,47 +183,48 @@ export async function awardSessionXP(
   userId: string,
   sessionData: AwardSessionXpInput
 ): Promise<AwardSessionXpResult> {
-  if (!mongoose.isValidObjectId(userId)) {
-    throw new Error('Invalid userId');
-  }
-
-  const userDoc = await UserModel.findById(userId).lean();
+  const { data: userDoc, error: userError } = await supabase
+    .from('gamer_users')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle<GamerUserRow>();
+  if (userError) throw userError;
   if (!userDoc) {
     throw new Error('User not found');
   }
 
   const user: UserXpSnapshot = {
-    _id: userDoc._id,
+    _id: userDoc.id,
     xp: {
-      fluency: userDoc.xp.fluency,
-      grammar: userDoc.xp.grammar,
-      eq: userDoc.xp.eq,
+      fluency: userDoc.xp_fluency,
+      grammar: userDoc.xp_grammar,
+      eq: userDoc.xp_eq,
     },
     levels: {
-      fluency: userDoc.levels.fluency,
-      grammar: userDoc.levels.grammar,
-      eq: userDoc.levels.eq,
-      composite: userDoc.levels.composite,
+      fluency: userDoc.level_fluency,
+      grammar: userDoc.level_grammar,
+      eq: userDoc.level_eq,
+      composite: userDoc.level_composite,
     },
-    streak: { current: userDoc.streak.current },
+    streak: { current: userDoc.streak_current },
   };
 
   const calc = calculateSessionXpAward(user, sessionData);
 
-  await UserModel.updateOne(
-    { _id: userId },
-    {
-      $inc: {
-        'xp.fluency': calc.xpAwarded.fluency,
-        'xp.grammar': calc.xpAwarded.grammar,
-        'xp.eq': calc.xpAwarded.eq,
-        'weeklySnapshot.xpEarned': calc.totalXp,
-      },
-      $set: {
-        levels: calc.newLevels,
-      },
-    }
-  );
+  const { error: updateError } = await supabase
+    .from('gamer_users')
+    .update({
+      xp_fluency: userDoc.xp_fluency + calc.xpAwarded.fluency,
+      xp_grammar: userDoc.xp_grammar + calc.xpAwarded.grammar,
+      xp_eq: userDoc.xp_eq + calc.xpAwarded.eq,
+      level_fluency: calc.newLevels.fluency,
+      level_grammar: calc.newLevels.grammar,
+      level_eq: calc.newLevels.eq,
+      level_composite: calc.newLevels.composite,
+      weekly_xp_earned: (userDoc.weekly_xp_earned ?? 0) + calc.totalXp,
+    })
+    .eq('id', userId);
+  if (updateError) throw updateError;
 
   return {
     xpAwarded: calc.xpAwarded,
@@ -239,27 +240,46 @@ export async function incrementUserXp(
   userId: string,
   delta: { fluency?: number; grammar?: number; eq?: number }
 ): Promise<void> {
-  if (!mongoose.isValidObjectId(userId)) {
-    throw new Error('Invalid userId');
-  }
   const df = delta.fluency ?? 0;
   const dg = delta.grammar ?? 0;
   const de = delta.eq ?? 0;
   if (df === 0 && dg === 0 && de === 0) return;
 
-  const u = await UserModel.findById(userId);
+  const { data: u, error: userError } = await supabase
+    .from('gamer_users')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle<GamerUserRow>();
+  if (userError) throw userError;
   if (!u) {
     throw new Error('User not found');
   }
 
-  u.xp.fluency += df;
-  u.xp.grammar += dg;
-  u.xp.eq += de;
-  u.levels.fluency = getLevelFromXP(u.xp.fluency, 'fluency');
-  u.levels.grammar = getLevelFromXP(u.xp.grammar, 'grammar');
-  u.levels.eq = getLevelFromXP(u.xp.eq, 'eq');
-  u.levels.composite = getCompositeLevel(u.levels);
-  u.weeklySnapshot.xpEarned = (u.weeklySnapshot.xpEarned ?? 0) + df + dg + de;
+  const nextXp = {
+    fluency: (u.xp_fluency ?? 0) + df,
+    grammar: (u.xp_grammar ?? 0) + dg,
+    eq: (u.xp_eq ?? 0) + de,
+  };
+  const nextLevels = {
+    fluency: getLevelFromXP(nextXp.fluency, 'fluency'),
+    grammar: getLevelFromXP(nextXp.grammar, 'grammar'),
+    eq: getLevelFromXP(nextXp.eq, 'eq'),
+    composite: 1,
+  };
+  nextLevels.composite = getCompositeLevel(nextLevels);
 
-  await u.save();
+  const { error: updateError } = await supabase
+    .from('gamer_users')
+    .update({
+      xp_fluency: nextXp.fluency,
+      xp_grammar: nextXp.grammar,
+      xp_eq: nextXp.eq,
+      level_fluency: nextLevels.fluency,
+      level_grammar: nextLevels.grammar,
+      level_eq: nextLevels.eq,
+      level_composite: nextLevels.composite,
+      weekly_xp_earned: (u.weekly_xp_earned ?? 0) + df + dg + de,
+    })
+    .eq('id', userId);
+  if (updateError) throw updateError;
 }

@@ -11,9 +11,9 @@ import time
 import math
 from collections import defaultdict, Counter
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, verify_jwt_in_request
 import spacy
 import nltk
 from nltk.corpus import words as nltk_words
@@ -25,6 +25,9 @@ import language_tool_python
 import pronouncing
 import difflib
 from textstat import flesch_reading_ease, flesch_kincaid_grade
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
+import bcrypt
 from ai_tutor import (
     generate_feedback,
     generate_partner_reply,
@@ -44,7 +47,9 @@ def safe_print(*args, **kwargs):
 
 print = safe_print
 
-# Load environment variables
+# Load environment variables (always resolve relative to this file)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_HERE, ".env"))
 load_dotenv()
 
 # LanguageTool downloads a large JAR on first use — do not block Flask startup on import.
@@ -141,17 +146,69 @@ class EnhancedAIEnglishTutor:
         _token_days = int(os.getenv('JWT_ACCESS_TOKEN_DAYS', '7'))
         self.app.config['JWT_ACCESS_TOKEN_EXPIRES'] = datetime.timedelta(days=_token_days)
         self.jwt = JWTManager(self.app)
+        self._register_auth_debug_hooks()
+        self._init_mongo_auth()
         _cors_raw = (os.getenv("CORS_ORIGINS") or "").strip()
         if _cors_raw:
             _cors_list = [o.strip() for o in _cors_raw.split(",") if o.strip()]
         else:
             _cors_list = [
                 "http://localhost:3000",
-                "http://127.0.0.1:3000",
                 "http://localhost:5173",
-                "http://127.0.0.1:5173",
             ]
-        CORS(self.app, origins=_cors_list)
+        self.allowed_origins = set(_cors_list)
+        CORS(
+            self.app,
+            resources={r"/api/*": {"origins": _cors_list}},
+            supports_credentials=True,
+            allow_headers=["Content-Type", "Authorization"],
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            max_age=86400,
+        )
+
+        @self.app.before_request
+        def _handle_cors_preflight():
+            """Never let browser preflight fall into auth/route failures."""
+            if request.method == "OPTIONS" and request.path.startswith("/api/"):
+                return jsonify({"ok": True, "preflight": True}), 200
+            if request.path == "/api/chat/partner/stream":
+                auth_header = request.headers.get("Authorization", "")
+                has_bearer = auth_header.lower().startswith("bearer ")
+                token_hint = auth_header[7:19] + "..." if has_bearer and len(auth_header) > 14 else "(missing)"
+                print(
+                    f"🔐 Stream auth check method={request.method} origin={request.headers.get('Origin')} "
+                    f"has_bearer={has_bearer} token_hint={token_hint}"
+                )
+            return None
+
+        @self.app.after_request
+        def _ensure_cors_headers(response):
+            """Force credential-safe CORS headers for browser requests."""
+            origin = (request.headers.get("Origin") or "").strip()
+            if origin and origin in self.allowed_origins and request.path.startswith("/api/"):
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Vary"] = "Origin"
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+                response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+                response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            return response
+
+    def _register_auth_debug_hooks(self):
+        @self.jwt.unauthorized_loader
+        def _unauthorized(reason):
+            print(f"❌ JWT unauthorized: {reason}; path={request.path}; method={request.method}")
+            return jsonify({"error": "Unauthorized", "details": reason}), 401
+
+        @self.jwt.invalid_token_loader
+        def _invalid_token(reason):
+            print(f"❌ JWT invalid token: {reason}; path={request.path}; method={request.method}")
+            return jsonify({"error": "Invalid token", "details": reason}), 401
+
+        @self.jwt.expired_token_loader
+        def _expired_token(jwt_header, jwt_payload):
+            sub = jwt_payload.get("sub")
+            print(f"❌ JWT expired for user={sub}; path={request.path}; method={request.method}")
+            return jsonify({"error": "Token expired", "details": "Please log in again."}), 401
         
         # Conversation personas: natural voice first, teaching second (avoids robotic LLM tone)
         self.personas = {
@@ -254,6 +311,150 @@ Keep it concise unless they go deep. Always use complete sentences and end prope
         except Exception as e:
             print(f"⚠️ LanguageTool warmup skipped: {e}")
 
+    def _init_mongo_auth(self):
+        """Initialize MongoDB connection for signup/login auth."""
+        self.mongo_client = None
+        self.mongo_db = None
+        self.mongo_users = None
+        self.mongo_profiles = None
+
+        mongo_uri = (os.getenv("MONGO_URI") or "").strip()
+        if not mongo_uri:
+            print("⚠️ MONGO_URI not set. Auth will fallback to local JSON users.")
+            return
+
+        db_name = (os.getenv("MONGO_DB_NAME") or "english_tutor").strip()
+        try:
+            self.mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+            self.mongo_client.admin.command("ping")
+            self.mongo_db = self.mongo_client[db_name]
+            self.mongo_users = self.mongo_db["users"]
+            self.mongo_profiles = self.mongo_db["user_profiles"]
+            self.mongo_users.create_index("username", unique=True)
+            self.mongo_users.create_index("email", unique=True)
+            self.mongo_profiles.create_index("username", unique=True)
+            self._migrate_legacy_users_to_mongo()
+            print(f"✅ MongoDB auth connected (db={db_name})")
+        except Exception as e:
+            print(f"⚠️ MongoDB auth unavailable: {e}")
+            self.mongo_client = None
+            self.mongo_db = None
+            self.mongo_users = None
+            self.mongo_profiles = None
+
+    def _migrate_legacy_users_to_mongo(self):
+        """Best-effort migration of legacy JSON users into Mongo collections."""
+        if self.mongo_users is None or self.mongo_profiles is None:
+            return
+        users_dir = os.path.join(_HERE, "users")
+        if not os.path.isdir(users_dir):
+            return
+
+        migrated = 0
+        for name in os.listdir(users_dir):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(users_dir, name)
+            try:
+                with open(path, "r") as f:
+                    data = json.load(f)
+                username = str(data.get("username") or "").strip()
+                email = str(data.get("email") or "").strip()
+                if not username:
+                    continue
+
+                # Auth document upsert.
+                self.mongo_users.update_one(
+                    {"username": username},
+                    {"$set": {
+                        "id": data.get("id"),
+                        "username": username,
+                        "email": email,
+                        "full_name": data.get("full_name"),
+                        "password_hash": data.get("password_hash"),
+                        "created_at": data.get("created_at"),
+                        "migrated_from_json": True,
+                        "updated_at": datetime.datetime.now().isoformat(),
+                    }},
+                    upsert=True,
+                )
+                # Full profile document upsert.
+                self.mongo_profiles.update_one(
+                    {"username": username},
+                    {"$set": data},
+                    upsert=True,
+                )
+                migrated += 1
+            except Exception as e:
+                print(f"⚠️ Legacy migration skipped for {name}: {e}")
+                continue
+        if migrated:
+            print(f"✅ Migrated {migrated} legacy JSON user profile(s) into Mongo")
+
+    def _hash_password_bcrypt(self, password):
+        return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+    def _verify_password_any(self, password, stored_hash):
+        """Verify bcrypt first, then fallback to legacy werkzeug hash format."""
+        if not stored_hash:
+            return False
+        try:
+            if stored_hash.startswith("$2a$") or stored_hash.startswith("$2b$") or stored_hash.startswith("$2y$"):
+                return bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
+        except Exception:
+            return False
+        try:
+            return check_password_hash(stored_hash, password)
+        except Exception:
+            return False
+
+    def _legacy_user_file(self, username):
+        return f"users/{username}.json"
+
+    def _load_user_data(self, username):
+        """Load full user profile data from Mongo profile store, fallback to legacy JSON."""
+        if self.mongo_profiles is not None:
+            try:
+                doc = self.mongo_profiles.find_one({"username": username}, {"_id": 0})
+                if doc:
+                    return doc
+            except PyMongoError as e:
+                print(f"Mongo profile load failed for {username}: {e}")
+
+        user_file = self._legacy_user_file(username)
+        if os.path.exists(user_file):
+            with open(user_file, "r") as f:
+                data = json.load(f)
+            # Best-effort migration into Mongo profile store.
+            if self.mongo_profiles is not None:
+                try:
+                    self.mongo_profiles.update_one(
+                        {"username": username},
+                        {"$set": data},
+                        upsert=True,
+                    )
+                except PyMongoError as e:
+                    print(f"Mongo profile migration failed for {username}: {e}")
+            return data
+        return None
+
+    def _save_user_data(self, username, user_data):
+        """Persist full user profile data to Mongo profile store (or legacy JSON fallback)."""
+        if self.mongo_profiles is not None:
+            try:
+                self.mongo_profiles.update_one(
+                    {"username": username},
+                    {"$set": user_data},
+                    upsert=True,
+                )
+                return
+            except PyMongoError as e:
+                print(f"Mongo profile save failed for {username}: {e}")
+
+        user_file = self._legacy_user_file(username)
+        with open(user_file, "w") as f:
+            json.dump(user_data, f, indent=2)
+
     def _detect_sentence_intent(self, message):
         """Detect if the user's input is a question, statement, or exclamation"""
         try:
@@ -312,6 +513,31 @@ Keep it concise unless they go deep. Always use complete sentences and end prope
                 'confidence': 0.5,
                 'error': str(e)
             }
+
+    def _normalize_user_sentence_punctuation(self, message):
+        """Add a question mark when text appears to be a question."""
+        text = (message or "").strip()
+        if not text:
+            return text
+
+        lowered = text.lower().strip()
+        is_question = False
+
+        if "?" in lowered:
+            is_question = True
+        elif re.search(r"^\s*(what|where|why|how|who)\b", lowered):
+            is_question = True
+        elif re.search(r"^\s*(do|does|did|is|are|was|were|can|could|will|would|should|have|has|had|may|might)\b", lowered):
+            is_question = True
+        elif re.search(r"\b(can you|could you|would you|do you think|is it|are there|should i)\b", lowered):
+            is_question = True
+
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"[.?!]+\s*$", "", text).strip()
+        if not text:
+            return text
+
+        return f"{text}?" if is_question else f"{text}."
 
     def _analyze_pronunciation_enhanced(self, text, user_data):
         """Enhanced pronunciation analysis with better phoneme-level scoring"""
@@ -954,6 +1180,144 @@ Keep it concise unless they go deep. Always use complete sentences and end prope
            })
        return backends
 
+    def _generate_live_partner_analysis(self, user_message, bot_reply="", history_pairs=None):
+       """Background semantic analysis for the partner chat sidebar."""
+       user_message = (user_message or "").strip()
+       bot_reply = (bot_reply or "").strip()
+       history_pairs = history_pairs or []
+
+       fallback = {
+           "summary": "Live analysis is warming up. Keep chatting and this panel will update.",
+           "tone": "neutral",
+           "intent": "conversation",
+           "confidence": 0.5,
+           "strengths": ["You are actively practicing in English."],
+           "improvements": ["Try one slightly longer sentence in your next message."],
+           "suggested_reply": "Can you tell me more about that?",
+       }
+
+       if not user_message:
+           return fallback
+
+       backends = self._get_llm_backends()
+       if not backends:
+           return fallback
+
+       recent = []
+       for pair in history_pairs[-6:]:
+           if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+               continue
+           u = str(pair[0] or "").strip()
+           a = str(pair[1] or "").strip()
+           if u:
+               recent.append(f"User: {u[:200]}")
+           if a:
+               recent.append(f"Emma: {a[:200]}")
+       if user_message:
+           recent.append(f"User (latest): {user_message[:400]}")
+       if bot_reply:
+           recent.append(f"Emma (latest): {bot_reply[:400]}")
+
+       prompt = """You are a silent conversation analyst for an English learning app.
+Return ONLY valid JSON with this exact schema:
+{
+  "summary": "one short sentence",
+  "tone": "positive|neutral|negative|anxious|curious",
+  "intent": "short phrase",
+  "confidence": number,
+  "strengths": ["short point", "short point"],
+  "improvements": ["short actionable tip", "short actionable tip"],
+  "suggested_reply": "one natural next user line"
+}
+Rules:
+- Keep everything concise and learner-friendly.
+- confidence must be from 0 to 1.
+- Max 2 items in strengths and improvements.
+- Ground analysis in the latest user line first; do not invent topic shifts.
+- If latest user line asks identity/challenge/profane question, tone is not "positive".
+- No markdown, no extra keys, JSON only."""
+
+       payload = {
+           "messages": [
+               {"role": "system", "content": prompt},
+               {"role": "user", "content": "\n".join(recent)},
+           ],
+           "max_tokens": 260,
+           "temperature": 0.3,
+           "top_p": 0.9,
+       }
+
+       for backend in backends:
+           try:
+               headers = {
+                   "Authorization": f"Bearer {backend['api_key']}",
+                   "Content-Type": "application/json",
+               }
+               req_payload = dict(payload)
+               req_payload["model"] = backend["model"]
+               resp = requests.post(backend["url"], headers=headers, json=req_payload, timeout=9)
+               if resp.status_code != 200:
+                   continue
+
+               content = (
+                   resp.json()
+                   .get("choices", [{}])[0]
+                   .get("message", {})
+                   .get("content", "")
+                   .strip()
+               )
+               if not content:
+                   continue
+               match = re.search(r"\{[\s\S]*\}", content)
+               if not match:
+                   continue
+               parsed = json.loads(match.group(0))
+               confidence = parsed.get("confidence", 0.5)
+               try:
+                   confidence = float(confidence)
+               except (TypeError, ValueError):
+                   confidence = 0.5
+               confidence = max(0.0, min(1.0, confidence))
+
+               strengths = parsed.get("strengths") or []
+               if isinstance(strengths, str):
+                   strengths = [strengths]
+               improvements = parsed.get("improvements") or []
+               if isinstance(improvements, str):
+                   improvements = [improvements]
+
+               result = {
+                   "summary": str(parsed.get("summary") or fallback["summary"]).strip(),
+                   "tone": str(parsed.get("tone") or "neutral").strip().lower(),
+                   "intent": str(parsed.get("intent") or "conversation").strip(),
+                   "confidence": confidence,
+                   "strengths": [str(x).strip() for x in strengths if str(x).strip()][:2] or fallback["strengths"],
+                   "improvements": [str(x).strip() for x in improvements if str(x).strip()][:2] or fallback["improvements"],
+                   "suggested_reply": str(parsed.get("suggested_reply") or fallback["suggested_reply"]).strip(),
+               }
+               latest = user_message.lower()
+               identity_or_challenge = (
+                   ("who are you" in latest)
+                   or ("what are you" in latest)
+                   or ("who the hell" in latest)
+                   or ("hell" in latest)
+               )
+               if identity_or_challenge:
+                   result["tone"] = "negative" if "hell" in latest else "curious"
+                   result["intent"] = "identity challenge"
+                   result["summary"] = "User is asking Emma's identity in a blunt tone."
+                   result["confidence"] = max(0.8, float(result.get("confidence", 0.0)))
+                   result["improvements"] = [
+                       "Ask direct but respectful questions for clearer responses.",
+                       "Try one follow-up about Emma's role or purpose.",
+                   ]
+                   result["suggested_reply"] = "Okay, who are you exactly and how can you help my English?"
+               return result
+           except Exception:
+               continue
+
+       return fallback
+
     def generate_ai_response(self, text, persona='beginner', conversation_history=None):
        """Generate AI response using Groq LLaMA 3 with robust fallbacks."""
        backends = self._get_llm_backends()
@@ -1201,8 +1565,6 @@ Reply rules:
     def _update_comprehensive_progress(self, user_data, username, user_message, bot_response, pronunciation_analysis, grammar_analysis, fluency_analysis, composite_score, tutor_feedback=None):
        """Update user progress with enhanced data tracking (mutates and saves ``user_data``)."""
        try:
-           user_file = f"users/{username}.json"
-           
            # Update scores with smoothing for stability
            old_scores = {
                'pronunciation': user_data['profile'].get('pronunciation_score', 0),
@@ -1290,8 +1652,7 @@ Reply rules:
                self._apply_tutor_memory(user_data, user_message, tutor_feedback)
            
            # Save updated data
-           with open(user_file, 'w') as f:
-               json.dump(user_data, f, indent=2)
+           self._save_user_data(username, user_data)
            
            print(f"✅ Enhanced progress updated for {username}")
            
@@ -1300,28 +1661,47 @@ Reply rules:
            traceback.print_exc()
 
     def _append_partner_exchange(self, user_data, username, user_message, bot_response):
-       """Persist a lightweight partner chat turn (no scoring pipeline)."""
+       """Persist partner chat turn and update progress metrics (scores, WPM, averages)."""
        try:
-           user_file = f"users/{username}.json"
-           if 'conversation_history' not in user_data:
-               user_data['conversation_history'] = []
-           user_data['conversation_history'].append({
-               'timestamp': datetime.datetime.now().isoformat(),
-               'user_message': user_message,
-               'bot_response': bot_response,
-               'mode': 'partner',
-           })
-           user_data['conversation_history'] = user_data['conversation_history'][-50:]
-           with open(user_file, 'w') as f:
-               json.dump(user_data, f, indent=2)
+           pronunciation_analysis = self._analyze_pronunciation_enhanced(user_message, user_data)
+           grammar_analysis = self._analyze_grammar_enhanced(user_message)
+           fluency_analysis = self._analyze_fluency_enhanced(user_message, user_data)
+           composite_score = self._calculate_composite_score(
+               pronunciation_analysis,
+               grammar_analysis,
+               fluency_analysis
+           )
+           self._update_comprehensive_progress(
+               user_data,
+               username,
+               user_message,
+               bot_response,
+               pronunciation_analysis,
+               grammar_analysis,
+               fluency_analysis,
+               composite_score
+           )
        except Exception as e:
-           print(f"Partner exchange save error: {e}")
-           traceback.print_exc()
+           # Never drop a partner chat turn; fallback keeps history even if analytics path fails.
+           print(f"Partner exchange analytics error (fallback to basic save): {e}")
+           try:
+               if 'conversation_history' not in user_data:
+                   user_data['conversation_history'] = []
+               user_data['conversation_history'].append({
+                   'timestamp': datetime.datetime.now().isoformat(),
+                   'user_message': user_message,
+                   'bot_response': bot_response,
+                   'mode': 'partner',
+               })
+               user_data['conversation_history'] = user_data['conversation_history'][-50:]
+               self._save_user_data(username, user_data)
+           except Exception as inner:
+               print(f"Partner exchange save fallback error: {inner}")
+               traceback.print_exc()
 
-    def _save_partner_wrapup(self, user_data, username, summary, improvements):
+    def _save_partner_wrapup(self, user_data, username, summary, improvements, message_count=0):
        """Store end-of-chat wrap-up on the user profile for progress tracking."""
        try:
-           user_file = f"users/{username}.json"
            improvements = [str(x).strip() for x in (improvements or []) if str(x).strip()][:5]
            summary = (summary or "").strip() or "Thanks for chatting today—small steps add up."
            user_data.setdefault('conversation_wrapups', []).append({
@@ -1335,16 +1715,72 @@ Reply rules:
                'summary': summary,
                'improvements': improvements,
            }
+           user_data.setdefault('session_history', [])
+           user_data['session_history'].append({
+               'timestamp': datetime.datetime.now().isoformat(),
+               'mode': 'partner',
+               'messages_sent': int(message_count or 0),
+               'avg_pronunciation_score': user_data.get('stats', {}).get('average_pronunciation_score', 0),
+               'avg_grammar_score': user_data.get('stats', {}).get('average_grammar_score', 0),
+               'avg_fluency_score': user_data.get('stats', {}).get('average_fluency_score', 0),
+           })
+           user_data['session_history'] = user_data['session_history'][-100:]
            hints = user_data.setdefault('learning_hints', [])
            for imp in improvements[:3]:
                if imp and imp not in hints:
                    hints.append(imp)
            user_data['learning_hints'] = hints[-25:]
-           with open(user_file, 'w') as f:
-               json.dump(user_data, f, indent=2)
+           self._save_user_data(username, user_data)
        except Exception as e:
            print(f"Partner wrap-up save error: {e}")
            traceback.print_exc()
+
+    def _backfill_partner_stats_if_missing(self, user_data, username):
+       """Repair legacy partner-only accounts where chat history exists but stats stayed at zero."""
+       try:
+           stats = user_data.setdefault('stats', {})
+           total_sessions = int(stats.get('total_sessions', 0) or 0)
+           history = user_data.get('conversation_history', []) or []
+           if total_sessions > 0 or not history:
+               return
+
+           scored_turns = [h for h in history if isinstance(h, dict) and isinstance(h.get('scores'), dict)]
+           if scored_turns:
+               stats['total_sessions'] = len(scored_turns)
+               stats['average_pronunciation_score'] = round(
+                   sum(float(h['scores'].get('pronunciation', 0)) for h in scored_turns) / max(1, len(scored_turns)), 1
+               )
+               stats['average_grammar_score'] = round(
+                   sum(float(h['scores'].get('grammar', 0)) for h in scored_turns) / max(1, len(scored_turns)), 1
+               )
+               stats['average_fluency_score'] = round(
+                   sum(float(h['scores'].get('fluency', 0)) for h in scored_turns) / max(1, len(scored_turns)), 1
+               )
+               stats['average_wpm'] = round(
+                   sum(float((h.get('analysis_details') or {}).get('wpm', 0)) for h in scored_turns) / max(1, len(scored_turns)), 1
+               )
+               last_ts = scored_turns[-1].get('timestamp')
+               if last_ts:
+                   stats['last_practice'] = last_ts
+           else:
+               # Legacy uns cored history: at least reflect chat count and profile-level averages.
+               profile = user_data.get('profile', {})
+               stats['total_sessions'] = len([h for h in history if isinstance(h, dict) and h.get('user_message')])
+               stats['average_pronunciation_score'] = float(profile.get('pronunciation_score', 0) or 0)
+               stats['average_grammar_score'] = float(profile.get('grammar_score', 0) or 0)
+               stats['average_fluency_score'] = float(profile.get('fluency_score', 0) or 0)
+               stats['average_wpm'] = float(stats.get('average_wpm', 0) or 0)
+               last_ts = None
+               for h in reversed(history):
+                   if isinstance(h, dict) and h.get('timestamp'):
+                       last_ts = h.get('timestamp')
+                       break
+               if last_ts:
+                   stats['last_practice'] = last_ts
+
+           self._save_user_data(username, user_data)
+       except Exception as e:
+           print(f"Partner stats backfill error: {e}")
 
     def _update_running_average(self, current_avg, new_value, count):
        """Update running average with new value"""
@@ -1369,10 +1805,21 @@ Reply rules:
                
                if len(password) < 6:
                    return jsonify({'error': 'Password must be at least 6 characters'}), 400
-               
-               user_file = f"users/{username}.json"
-               if os.path.exists(user_file):
-                   return jsonify({'error': 'Username already exists'}), 409
+
+               user_file = self._legacy_user_file(username)
+               mongo_user_doc = None
+               if self.mongo_users is not None:
+                   try:
+                       mongo_user_doc = self.mongo_users.find_one(
+                           {"$or": [{"username": username}, {"email": email}]},
+                           {"_id": 1, "username": 1, "email": 1},
+                       )
+                   except PyMongoError as e:
+                       print(f"Mongo signup lookup failed: {e}")
+                       return jsonify({'error': 'Auth storage unavailable'}), 503
+
+               if mongo_user_doc is not None or os.path.exists(user_file):
+                   return jsonify({'error': 'Username or email already exists'}), 409
                
                # Auto level: no fake scores until the learner has chatted once (see awaiting_initial_assessment)
                if initial_level == 'auto':
@@ -1399,7 +1846,7 @@ Reply rules:
                    'username': username,
                    'email': email,
                    'full_name': full_name,
-                   'password_hash': generate_password_hash(password),
+                   'password_hash': self._hash_password_bcrypt(password),
                    'created_at': datetime.datetime.now().isoformat(),
                    'profile': {
                        'level': level,
@@ -1463,9 +1910,22 @@ Reply rules:
                        }
                    ]
                }
+
+               if self.mongo_users is not None:
+                   try:
+                       self.mongo_users.insert_one({
+                           "id": user_data["id"],
+                           "username": username,
+                           "email": email,
+                           "full_name": full_name,
+                           "password_hash": user_data["password_hash"],
+                           "created_at": user_data["created_at"],
+                       })
+                   except PyMongoError as e:
+                       print(f"Mongo signup insert failed: {e}")
+                       return jsonify({'error': 'Could not create account in auth storage'}), 503
                
-               with open(user_file, 'w') as f:
-                   json.dump(user_data, f, indent=2)
+               self._save_user_data(username, user_data)
                
                access_token = create_access_token(identity=username)
                
@@ -1496,16 +1956,56 @@ Reply rules:
                
                if not username or not password:
                    return jsonify({'error': 'Username and password required'}), 400
-               
-               user_file = f"users/{username}.json"
-               if not os.path.exists(user_file):
-                   return jsonify({'error': 'Invalid username or password'}), 401
-               
-               with open(user_file, 'r') as f:
-                   user_data = json.load(f)
-               
-               if not check_password_hash(user_data['password_hash'], password):
-                   return jsonify({'error': 'Invalid username or password'}), 401
+
+               user_data = None
+               mongo_auth_ok = False
+
+               if self.mongo_users is not None:
+                   try:
+                       mongo_doc = self.mongo_users.find_one({"username": username})
+                   except PyMongoError as e:
+                       print(f"Mongo login lookup failed: {e}")
+                       return jsonify({'error': 'Auth storage unavailable'}), 503
+                   if mongo_doc and self._verify_password_any(password, mongo_doc.get('password_hash', '')):
+                       mongo_auth_ok = True
+                       user_data = self._load_user_data(username)
+                       if user_data is None:
+                           return jsonify({'error': 'User profile not found; please signup again'}), 404
+
+               if not mongo_auth_ok:
+                   # Backward compatibility: legacy local users can still login once,
+                   # then we migrate credential hash into Mongo (bcrypt).
+                   user_file = self._legacy_user_file(username)
+                   if not os.path.exists(user_file):
+                       return jsonify({'error': 'Invalid username or password'}), 401
+
+                   user_data = self._load_user_data(username)
+                   if user_data is None:
+                       return jsonify({'error': 'Invalid username or password'}), 401
+
+                   stored_hash = user_data.get('password_hash', '')
+                   if not self._verify_password_any(password, stored_hash):
+                       return jsonify({'error': 'Invalid username or password'}), 401
+
+                   if self.mongo_users is not None:
+                       try:
+                           migrated_hash = self._hash_password_bcrypt(password)
+                           self.mongo_users.update_one(
+                               {"username": username},
+                               {"$set": {
+                                   "id": user_data.get('id'),
+                                   "username": username,
+                                   "email": user_data.get('email'),
+                                   "full_name": user_data.get('full_name'),
+                                   "password_hash": migrated_hash,
+                                   "updated_at": datetime.datetime.now().isoformat(),
+                               }},
+                               upsert=True,
+                           )
+                           user_data['password_hash'] = migrated_hash
+                           self._save_user_data(username, user_data)
+                       except PyMongoError as e:
+                           print(f"Mongo auth migration failed for {username}: {e}")
                
                access_token = create_access_token(identity=username)
                
@@ -1535,16 +2035,16 @@ Reply rules:
            try:
                username = get_jwt_identity()
                data = request.get_json()
-               message = data.get('message', '').strip()
+               message = self._normalize_user_sentence_punctuation(data.get('message', ''))
                conversation_mode = data.get('conversation_mode', 'natural')
                
                if not message:
                    return jsonify({'error': 'Message cannot be empty'}), 400
                
                # Load user data
-               user_file = f"users/{username}.json"
-               with open(user_file, 'r') as f:
-                   user_data = json.load(f)
+               user_data = self._load_user_data(username)
+               if user_data is None:
+                   return jsonify({'error': 'User not found'}), 404
                
                print(f"📝 Processing message from {username}: {message[:50]}...")
                
@@ -1678,16 +2178,13 @@ Reply rules:
            try:
                username = get_jwt_identity()
                data = request.get_json() or {}
-               message = (data.get('message') or '').strip()
+               message = self._normalize_user_sentence_punctuation(data.get('message'))
                if not message:
                    return jsonify({'error': 'Message cannot be empty'}), 400
 
-               user_file = f"users/{username}.json"
-               if not os.path.exists(user_file):
+               user_data = self._load_user_data(username)
+               if user_data is None:
                    return jsonify({'error': 'User not found'}), 404
-
-               with open(user_file, 'r') as f:
-                   user_data = json.load(f)
 
                persona = user_data.get('profile', {}).get('current_persona', 'beginner')
                hist = user_data.get('conversation_history', [])[-10:]
@@ -1707,6 +2204,58 @@ Reply rules:
                }), 200
            except Exception as e:
                print(f"Partner chat error: {e}")
+               traceback.print_exc()
+               return jsonify({'error': 'Could not process message'}), 500
+
+       @self.app.route('/api/chat/partner/stream', methods=['POST'])
+       @jwt_required()
+       def chat_partner_stream():
+           try:
+               username = get_jwt_identity()
+               data = request.get_json() or {}
+               message = self._normalize_user_sentence_punctuation(data.get('message'))
+               if not message:
+                   return jsonify({'error': 'Message cannot be empty'}), 400
+
+               user_data = self._load_user_data(username)
+               if user_data is None:
+                   return jsonify({'error': 'User not found'}), 404
+
+               persona = user_data.get('profile', {}).get('current_persona', 'beginner')
+               hist = user_data.get('conversation_history', [])[-10:]
+               pairs = []
+               for h in hist:
+                   u = h.get('user_message')
+                   b = h.get('bot_response')
+                   if u and b:
+                       pairs.append((u, b))
+
+               t0 = time.time()
+               reply = generate_partner_reply(message, pairs, persona)
+               self._append_partner_exchange(user_data, username, message, reply)
+
+               @stream_with_context
+               def event_stream():
+                   words = str(reply or "").split()
+                   chunk_size = 6
+                   built = []
+                   for i in range(0, len(words), chunk_size):
+                       part = " ".join(words[i:i + chunk_size]).strip()
+                       if not part:
+                           continue
+                       built.append(part)
+                       payload = {'text': " ".join(built)}
+                       yield f"data: {json.dumps(payload)}\n\n"
+                   done = {
+                       'final': True,
+                       'response': reply,
+                       'processing_time': round(time.time() - t0, 2),
+                   }
+                   yield f"data: {json.dumps(done)}\n\n"
+
+               return Response(event_stream(), mimetype='text/event-stream')
+           except Exception as e:
+               print(f"Partner stream error: {e}")
                traceback.print_exc()
                return jsonify({'error': 'Could not process message'}), 500
 
@@ -1733,40 +2282,78 @@ Reply rules:
 
                transcript = "\n".join(lines)
                wrap = generate_partner_session_wrapup(transcript)
+               message_count = len([m for m in messages if isinstance(m, dict) and m.get('type') == 'user'])
 
-               user_file = f"users/{username}.json"
-               if os.path.exists(user_file):
-                   with open(user_file, 'r') as f:
-                       user_data = json.load(f)
+               user_data = self._load_user_data(username)
+               if user_data is not None:
                    self._save_partner_wrapup(
                        user_data,
                        username,
                        wrap.get('summary', ''),
                        wrap.get('improvements', []),
+                       message_count=message_count,
                    )
 
                return jsonify({
                    'summary': wrap.get('summary', ''),
                    'improvements': wrap.get('improvements', [])[:3],
-                   'message_count': len([m for m in messages if isinstance(m, dict) and m.get('type') == 'user']),
+                   'message_count': message_count,
                }), 200
            except Exception as e:
                print(f"Partner end error: {e}")
                traceback.print_exc()
                return jsonify({'error': 'Could not generate wrap-up'}), 500
 
+       @self.app.route('/api/chat/partner/live-analysis', methods=['POST', 'OPTIONS'])
+       def chat_partner_live_analysis():
+           try:
+               if request.method == 'OPTIONS':
+                   return jsonify({'ok': True}), 200
+
+               verify_jwt_in_request()
+               username = get_jwt_identity()
+               data = request.get_json() or {}
+               message = self._normalize_user_sentence_punctuation(data.get('message'))
+               bot_reply = (data.get('bot_reply') or '').strip()
+               if not message:
+                   return jsonify({'error': 'Message cannot be empty'}), 400
+
+               user_data = self._load_user_data(username)
+               if user_data is None:
+                   return jsonify({'error': 'User not found'}), 404
+
+               hist = user_data.get('conversation_history', [])[-10:]
+               pairs = []
+               for h in hist:
+                   u = h.get('user_message')
+                   b = h.get('bot_response')
+                   if u and b:
+                       pairs.append((u, b))
+
+               result = self._generate_live_partner_analysis(message, bot_reply, pairs)
+               return jsonify(result), 200
+           except Exception as e:
+               print(f"Live analysis error on {request.method} {request.path}: {e}")
+               traceback.print_exc()
+               return jsonify({
+                   'summary': 'Live analysis is unavailable right now.',
+                   'tone': 'neutral',
+                   'intent': 'conversation',
+                   'confidence': 0.5,
+                   'strengths': ['You are still practicing, which matters most.'],
+                   'improvements': ['Try again with a short clear sentence.'],
+                   'suggested_reply': 'Can you explain that in another way?',
+               }), 200
+
        @self.app.route('/api/user/stats', methods=['GET'])
        @jwt_required()
        def get_stats():
            try:
                username = get_jwt_identity()
-               user_file = f"users/{username}.json"
-               
-               if not os.path.exists(user_file):
+               user_data = self._load_user_data(username)
+               if user_data is None:
                    return jsonify({'error': 'User not found'}), 404
-               
-               with open(user_file, 'r') as f:
-                   user_data = json.load(f)
+               self._backfill_partner_stats_if_missing(user_data, username)
                
                # Calculate recent sessions (this week)
                recent_sessions = user_data.get('session_history', [])
@@ -1836,10 +2423,9 @@ Reply rules:
        def get_profile():
            try:
                username = get_jwt_identity()
-               user_file = f"users/{username}.json"
-               
-               with open(user_file, 'r') as f:
-                   user_data = json.load(f)
+               user_data = self._load_user_data(username)
+               if user_data is None:
+                   return jsonify({'error': 'User not found'}), 404
                
                profile_data = {
                    'username': user_data['username'],
@@ -1874,9 +2460,9 @@ Reply rules:
                if new_level not in ['beginner', 'intermediate', 'advanced', 'native']:
                    return jsonify({'error': 'Invalid level'}), 400
                
-               user_file = f"users/{username}.json"
-               with open(user_file, 'r') as f:
-                   user_data = json.load(f)
+               user_data = self._load_user_data(username)
+               if user_data is None:
+                   return jsonify({'error': 'User not found'}), 404
                
                old_level = user_data['profile']['level']
                
@@ -1913,8 +2499,7 @@ Reply rules:
                    'method': 'manual'
                })
                
-               with open(user_file, 'w') as f:
-                   json.dump(user_data, f, indent=2)
+               self._save_user_data(username, user_data)
                
                print(f"🎭 User {username} manually changed level: {old_level} → {new_level}")
                
@@ -1934,9 +2519,9 @@ Reply rules:
        def pronunciation_advanced_assessment():
            try:
                username = get_jwt_identity()
-               user_file = f"users/{username}.json"
-               with open(user_file, 'r') as f:
-                   user_data = json.load(f)
+               user_data = self._load_user_data(username)
+               if user_data is None:
+                   return jsonify({'error': 'User not found'}), 404
 
                recent_pronunciation = [
                    entry.get('score', 0)
@@ -2001,9 +2586,9 @@ Reply rules:
        def detailed_progress_analytics():
            try:
                username = get_jwt_identity()
-               user_file = f"users/{username}.json"
-               with open(user_file, 'r') as f:
-                   user_data = json.load(f)
+               user_data = self._load_user_data(username)
+               if user_data is None:
+                   return jsonify({'error': 'User not found'}), 404
 
                profile = user_data.get('profile', {})
                stats = user_data.get('stats', {})

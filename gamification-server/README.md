@@ -1,6 +1,6 @@
-# Fluency Engine — Gamification data layer
+# Fluency Engine — Gamification backend
 
-MongoDB **Mongoose** models for the Fluency Engine (Part 1 — schema). This package is **standalone** from the Python Flask tutor API so you can run a future **Express** service against the same `MONGODB_URI`.
+Gamification API powered by **Supabase Postgres**. This package is standalone from the Python Flask tutor API and uses the same JWT secret for auth token verification.
 
 ## Setup
 
@@ -10,19 +10,23 @@ npm install
 npm run typecheck
 ```
 
-Copy `.env.example` to `.env` and set `MONGODB_URI`.
+Copy `.env.example` to `.env` and set:
 
-## Collections
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `JWT_SECRET_KEY` (same as Flask backend)
 
-| Collection          | Model                 | File                 |
-|---------------------|-----------------------|----------------------|
-| `users`             | `UserModel`           | `models/User.ts`     |
-| `sessions`          | `GamificationSessionModel` | `models/Session.ts` |
-| `mistakes`          | `MistakeModel`        | `models/Mistake.ts`  |
-| `emotionScenarios`  | `EmotionScenarioModel` | `models/EmotionScenario.ts` |
-| `quizResults`       | `QuizResultModel`     | `models/QuizResult.ts` |
-| `achievements`      | `AchievementModel`   | `models/Achievement.ts` |
-| `questionBank`      | `QuestionBankModel`   | `models/QuestionBank.ts` |
+## Supabase tables
+
+Expected core tables:
+
+- `gamer_users`
+- `gamer_sessions`
+- `gamer_mistakes`
+- `gamer_questions`
+- `gamer_quiz_results`
+- `gamer_emotion_scenarios`
+- `gamer_achievements`
 
 ## Frontend types
 
@@ -36,6 +40,6 @@ Shared JSON-oriented types live in `frontend/src/types/gamification.ts` (string 
 
 Frontend mirror of constants only: `frontend/src/constants/xp.ts`.
 
-## Note on `weeklySnapshot.xpEarned`
+## Note on weekly leaderboard
 
-Part 1 user schema lists deltas only; Part 3 leaderboard references `xpEarned` for weekly sort. The Mongoose schema includes **`xpEarned`** (default `0`) so weekly ranking can be implemented without a second collection.
+Leaderboard sorting uses `gamer_users.weekly_xp_earned` for weekly scope and `gamer_users.level_composite` for all-time scope.

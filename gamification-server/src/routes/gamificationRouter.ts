@@ -1,20 +1,16 @@
 import { Router, type Request, type Response } from 'express';
-import mongoose, { type SortOrder } from 'mongoose';
+import crypto from 'crypto';
 import { XP_REWARDS } from '../constants/xp';
 import { COACH_MODE_MIN_COMPOSITE } from '../constants/coachModes';
 import { EMPATH_UNLOCK_STAMPS, PERSONA_UNLOCK_LEVEL, PERSONA_TYPES } from '../constants/personas';
-import { AchievementModel } from '../models/Achievement';
-import { EmotionScenarioModel } from '../models/EmotionScenario';
-import { GamificationSessionModel } from '../models/Session';
-import { MistakeModel } from '../models/Mistake';
-import { QuestionBankModel } from '../models/QuestionBank';
-import { QuizResultModel } from '../models/QuizResult';
-import { UserModel } from '../models/User';
+import { supabase } from '../config/supabase';
 import { requireAuth } from '../middleware/auth';
 import { reviewFlashcard } from '../services/flashcardService';
 import { recordMicroSession, updateStreak } from '../services/streakService';
 import { awardSessionXP, incrementUserXp } from '../services/xpService';
 import type { AwardSessionXpInput } from '../types/xp';
+import type { GamerUserApi, GamerUserRow } from '../types/gamer';
+import { toGamerUserApi } from '../types/gamer';
 import {
   coachModePutSchema,
   flashcardReviewSchema,
@@ -29,6 +25,85 @@ const router = Router();
 
 router.use(requireAuth);
 
+async function getUserById(userId: string): Promise<GamerUserApi | null> {
+  const { data, error } = await supabase
+    .from('gamer_users')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle<GamerUserRow>();
+  if (error) throw error;
+  return data ? toGamerUserApi(data) : null;
+}
+
+function toApiMistake(row: Record<string, unknown>) {
+  return {
+    _id: String(row.id),
+    userId: String(row.user_id),
+    sessionId: row.session_id ? String(row.session_id) : null,
+    originalUtterance: String(row.original_utterance ?? ''),
+    correctedForm: String(row.corrected_form ?? ''),
+    errorType: String(row.error_type ?? ''),
+    errorTag: String(row.error_tag ?? ''),
+    nextReviewDate: row.next_review_date,
+    intervalDays: Number(row.interval_days ?? 1),
+    easeFactor: Number(row.ease_factor ?? 2.5),
+    reviewCount: Number(row.review_count ?? 0),
+    lastReviewResult: (row.last_review_result as string | null | undefined) ?? null,
+  };
+}
+
+const FALLBACK_GRAMMAR_QUESTIONS = [
+  {
+    id: 'fallback-g-1',
+    type: 'grammar',
+    difficulty: 1,
+    question_text: 'Choose the correct sentence.',
+    options: ['She go to school every day.', 'She goes to school every day.', 'She going to school every day.'],
+    correct_answer: 'She goes to school every day.',
+    explanation: 'Use third-person singular verb form: goes.',
+  },
+  {
+    id: 'fallback-g-2',
+    type: 'grammar',
+    difficulty: 1,
+    question_text: 'Pick the correct sentence.',
+    options: ['I have went there yesterday.', 'I went there yesterday.', 'I gone there yesterday.'],
+    correct_answer: 'I went there yesterday.',
+    explanation: 'Use simple past: went.',
+  },
+  {
+    id: 'fallback-g-3',
+    type: 'grammar',
+    difficulty: 2,
+    question_text: 'Complete the sentence: If I ___ more time, I would study abroad.',
+    options: ['have', 'had', 'will have'],
+    correct_answer: 'had',
+    explanation: 'Second conditional uses past simple in the if-clause.',
+  },
+  {
+    id: 'fallback-g-4',
+    type: 'grammar',
+    difficulty: 2,
+    question_text: 'Choose the correct article usage.',
+    options: ['She is an university student.', 'She is a university student.', 'She is the university student.'],
+    correct_answer: 'She is a university student.',
+    explanation: 'Use "a" before "university" because it starts with a consonant sound.',
+  },
+  {
+    id: 'fallback-g-5',
+    type: 'grammar',
+    difficulty: 1,
+    question_text: 'Select the best option.',
+    options: ['There is many books on the table.', 'There are many books on the table.', 'There be many books on the table.'],
+    correct_answer: 'There are many books on the table.',
+    explanation: 'Use "are" with plural noun "books".',
+  },
+];
+
+function isUuidLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 function forbid(res: Response): void {
   res.status(403).json({ error: 'Forbidden' });
 }
@@ -36,7 +111,6 @@ function forbid(res: Response): void {
 function assertSelf(req: Request, userId: string): boolean {
   return req.gamer?.userId === userId;
 }
-
 router.post('/session/complete', async (req: Request, res: Response) => {
   try {
     const parsed = sessionCompleteSchema.safeParse(req.body);
@@ -65,68 +139,71 @@ router.post('/session/complete', async (req: Request, res: Response) => {
       avgScore
     );
 
-    const user = await UserModel.findById(userId);
+    const user = await getUserById(userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
     }
 
-    await GamificationSessionModel.findOneAndUpdate(
-      { _id: body.sessionId, userId: new mongoose.Types.ObjectId(userId) },
-      {
-        $set: {
-          endedAt: new Date(),
-          scores: body.scores,
-          turnCount: body.turnCount,
-          emotionProfile: body.emotionProfile,
-          persona: user.activePersona,
-          coachMode: user.activeCoachMode,
-          xpAwarded: xpResult.xpAwarded,
-          resilienceBonusAwarded: streakResult.resilienceBonusAwarded,
-        },
-        $setOnInsert: {
-          userId: new mongoose.Types.ObjectId(userId),
-          startedAt: new Date(),
-        },
-      },
-      { upsert: true, new: true }
-    );
+    const { error: sessionError } = await supabase.from('gamer_sessions').upsert({
+      id: body.sessionId,
+      user_id: userId,
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString(),
+      scores: body.scores,
+      turn_count: body.turnCount,
+      emotion_profile: body.emotionProfile,
+      persona: user.activePersona,
+      coach_mode: user.activeCoachMode,
+      xp_awarded: xpResult.xpAwarded.fluency + xpResult.xpAwarded.grammar + xpResult.xpAwarded.eq,
+      resilience_bonus_awarded: streakResult.resilienceBonusAwarded,
+    });
+    if (sessionError) throw sessionError;
 
-    const sid = new mongoose.Types.ObjectId(body.sessionId);
     for (const row of body.mistakes ?? []) {
-      await MistakeModel.create({
-        userId: new mongoose.Types.ObjectId(userId),
-        sessionId: sid,
-        originalUtterance: row.originalUtterance,
-        correctedForm: row.correctedForm,
-        errorType: row.errorType,
-        errorTag: row.errorTag,
-        nextReviewDate: new Date(Date.now() + 86400000),
-        intervalDays: 1,
-        easeFactor: 2.5,
-        reviewCount: 0,
+      const { error: mistakeError } = await supabase.from('gamer_mistakes').insert({
+        user_id: userId,
+        session_id: body.sessionId,
+        original_utterance: row.originalUtterance,
+        corrected_form: row.correctedForm,
+        error_type: row.errorType,
+        error_tag: row.errorTag,
+        next_review_date: new Date().toISOString(),
+        interval_days: 1,
+        ease_factor: 2.5,
+        review_count: 0,
       });
+      if (mistakeError) throw mistakeError;
     }
 
-    const u2 = await UserModel.findById(userId);
+    const u2 = await getUserById(userId);
     if (u2) {
+      const unlockedPersonas = [...u2.unlockedPersonas];
+      const unlockedCoachModes = [...u2.unlockedCoachModes];
       const c = u2.levels.composite;
-      if (c >= PERSONA_UNLOCK_LEVEL.storyteller && !u2.unlockedPersonas.includes('storyteller')) {
-        u2.unlockedPersonas.push('storyteller');
+      if (c >= PERSONA_UNLOCK_LEVEL.storyteller && !unlockedPersonas.includes('storyteller')) {
+        unlockedPersonas.push('storyteller');
       }
-      if (c >= PERSONA_UNLOCK_LEVEL.debater && !u2.unlockedPersonas.includes('debater')) {
-        u2.unlockedPersonas.push('debater');
+      if (c >= PERSONA_UNLOCK_LEVEL.debater && !unlockedPersonas.includes('debater')) {
+        unlockedPersonas.push('debater');
       }
-      if (u2.emotionPassport.stampCount >= EMPATH_UNLOCK_STAMPS && !u2.unlockedPersonas.includes('empath')) {
-        u2.unlockedPersonas.push('empath');
+      if (u2.emotionPassport.stampCount >= EMPATH_UNLOCK_STAMPS && !unlockedPersonas.includes('empath')) {
+        unlockedPersonas.push('empath');
       }
-      if (c >= COACH_MODE_MIN_COMPOSITE.strict && !u2.unlockedCoachModes.includes('strict')) {
-        u2.unlockedCoachModes.push('strict');
+      if (c >= COACH_MODE_MIN_COMPOSITE.strict && !unlockedCoachModes.includes('strict')) {
+        unlockedCoachModes.push('strict');
       }
-      if (c >= COACH_MODE_MIN_COMPOSITE.debate && !u2.unlockedCoachModes.includes('debate')) {
-        u2.unlockedCoachModes.push('debate');
+      if (c >= COACH_MODE_MIN_COMPOSITE.debate && !unlockedCoachModes.includes('debate')) {
+        unlockedCoachModes.push('debate');
       }
-      await u2.save();
+      const { error: unlockError } = await supabase
+        .from('gamer_users')
+        .update({
+          unlocked_personas: unlockedPersonas,
+          unlocked_coach_modes: unlockedCoachModes,
+        })
+        .eq('id', userId);
+      if (unlockError) throw unlockError;
     }
 
     const achievements: unknown[] = [];
@@ -159,22 +236,20 @@ router.post('/micro-session', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/profile/:userId', async (req: Request, res: Response) => {
+router.get('/profile/self', async (req: Request, res: Response) => {
   try {
-    const { userId } = req.params;
-    if (!userId || !assertSelf(req, userId)) {
-      forbid(res);
-      return;
-    }
-    const user = await UserModel.findById(userId).lean();
+    const user = await getUserById(req.gamer!.userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
     }
-    const recentAchievements = await AchievementModel.find({ userId: user._id })
-      .sort({ awardedAt: -1 })
-      .limit(8)
-      .lean();
+    const { data: recentAchievements, error: achError } = await supabase
+      .from('gamer_achievements')
+      .select('*')
+      .eq('user_id', user._id)
+      .order('awarded_at', { ascending: false })
+      .limit(8);
+    if (achError) throw achError;
     res.json({ ...user, recentAchievements });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
@@ -182,17 +257,25 @@ router.get('/profile/:userId', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/profile/self', async (req: Request, res: Response) => {
+router.get('/profile/:userId', async (req: Request, res: Response) => {
   try {
-    const user = await UserModel.findById(req.gamer!.userId).lean();
+    const { userId } = req.params;
+    if (!userId || !assertSelf(req, userId)) {
+      forbid(res);
+      return;
+    }
+    const user = await getUserById(userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
     }
-    const recentAchievements = await AchievementModel.find({ userId: user._id })
-      .sort({ awardedAt: -1 })
-      .limit(8)
-      .lean();
+    const { data: recentAchievements, error: achError } = await supabase
+      .from('gamer_achievements')
+      .select('*')
+      .eq('user_id', user._id)
+      .order('awarded_at', { ascending: false })
+      .limit(8);
+    if (achError) throw achError;
     res.json({ ...user, recentAchievements });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
@@ -204,19 +287,20 @@ router.get('/flashcards/due', async (req: Request, res: Response) => {
   try {
     const userId = String(req.query.userId ?? '');
     const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? '10'), 10) || 10));
-    if (!mongoose.isValidObjectId(userId) || !assertSelf(req, userId)) {
+    if (!userId || !assertSelf(req, userId)) {
       forbid(res);
       return;
     }
     const now = new Date();
-    const cards = await MistakeModel.find({
-      userId: new mongoose.Types.ObjectId(userId),
-      nextReviewDate: { $lte: now },
-    })
-      .sort({ nextReviewDate: 1 })
-      .limit(limit)
-      .lean();
-    res.json({ cards });
+    const { data: cards, error: cardsError } = await supabase
+      .from('gamer_mistakes')
+      .select('*')
+      .eq('user_id', userId)
+      .lte('next_review_date', now.toISOString())
+      .order('next_review_date', { ascending: true })
+      .limit(limit);
+    if (cardsError) throw cardsError;
+    res.json({ cards: (cards ?? []).map((c) => toApiMistake(c)) });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });
@@ -228,14 +312,15 @@ router.get('/flashcards/due/me', async (req: Request, res: Response) => {
     const userId = req.gamer!.userId;
     const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? '10'), 10) || 10));
     const now = new Date();
-    const cards = await MistakeModel.find({
-      userId: new mongoose.Types.ObjectId(userId),
-      nextReviewDate: { $lte: now },
-    })
-      .sort({ nextReviewDate: 1 })
-      .limit(limit)
-      .lean();
-    res.json({ cards });
+    const { data: cards, error: cardsError } = await supabase
+      .from('gamer_mistakes')
+      .select('*')
+      .eq('user_id', userId)
+      .lte('next_review_date', now.toISOString())
+      .order('next_review_date', { ascending: true })
+      .limit(limit);
+    if (cardsError) throw cardsError;
+    res.json({ cards: (cards ?? []).map((c) => toApiMistake(c)) });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });
@@ -250,20 +335,24 @@ router.get('/quiz/questions', async (req: Request, res: Response) => {
       return;
     }
     const limit = Math.min(20, Math.max(1, parseInt(String(req.query.limit ?? '10'), 10) || 10));
-    const questions = await QuestionBankModel.aggregate([
-      { $match: { type: quizType } },
-      { $sample: { size: limit } },
-      {
-        $project: {
-          _id: 1,
-          type: 1,
-          difficulty: 1,
-          questionText: 1,
-          options: 1,
-          explanation: 1,
-        },
-      },
-    ]);
+    const { data: pool, error: questionError } = await supabase
+      .from('gamer_questions')
+      .select('id,type,difficulty,question_text,options,explanation')
+      .eq('type', quizType)
+      .limit(Math.max(limit * 3, limit));
+    if (questionError) throw questionError;
+    const shuffled = [...(pool ?? [])].sort(() => Math.random() - 0.5).slice(0, limit);
+    const source = shuffled.length > 0
+      ? shuffled
+      : FALLBACK_GRAMMAR_QUESTIONS.slice(0, limit);
+    const questions = source.map((q) => ({
+      _id: q.id,
+      type: q.type,
+      difficulty: q.difficulty,
+      questionText: q.question_text,
+      options: q.options,
+      explanation: q.explanation,
+    }));
     res.json({ questions });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
@@ -283,7 +372,7 @@ router.post('/flashcards/review', async (req: Request, res: Response) => {
     if (xpAwarded > 0) {
       await incrementUserXp(req.gamer!.userId, { grammar: xpAwarded });
     }
-    res.json({ card, xpAwarded });
+    res.json({ card: toApiMistake(card as unknown as Record<string, unknown>), xpAwarded });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     const code = msg === 'Card not found' ? 404 : 500;
@@ -299,17 +388,19 @@ router.get('/scenarios', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'Invalid persona' });
       return;
     }
-    const user = await UserModel.findById(req.gamer!.userId).lean();
+    const user = await getUserById(req.gamer!.userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
     }
     const done = new Set(user.emotionPassport.completedScenarios.map((c) => c.scenarioId));
-    const scenarios = await EmotionScenarioModel.find({
-      difficulty,
-      persona: { $in: [persona] },
-      scenarioId: { $nin: [...done] },
-    }).lean();
+    const { data: scenarioRows, error: scenariosError } = await supabase
+      .from('gamer_emotion_scenarios')
+      .select('*')
+      .eq('difficulty', difficulty)
+      .eq('persona', persona);
+    if (scenariosError) throw scenariosError;
+    const scenarios = (scenarioRows ?? []).filter((s) => !done.has(String(s.scenario_id)));
     res.json({ scenarios });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
@@ -325,13 +416,18 @@ router.post('/scenarios/complete', async (req: Request, res: Response) => {
       return;
     }
     const { scenarioId, aiEqScore } = parsed.data;
-    const scenario = await EmotionScenarioModel.findOne({ scenarioId }).lean();
+    const { data: scenario, error: scenarioError } = await supabase
+      .from('gamer_emotion_scenarios')
+      .select('*')
+      .eq('scenario_id', scenarioId)
+      .maybeSingle();
+    if (scenarioError) throw scenarioError;
     if (!scenario) {
       res.status(404).json({ error: 'Scenario not found' });
       return;
     }
 
-    const user = await UserModel.findById(req.gamer!.userId);
+    const user = await getUserById(req.gamer!.userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
@@ -342,49 +438,67 @@ router.post('/scenarios/complete', async (req: Request, res: Response) => {
       return;
     }
 
+    const xpReward = (scenario.xp_reward ?? { fluency: 0, grammar: 0, eq: 0 }) as {
+      fluency: number;
+      grammar: number;
+      eq: number;
+    };
     const extra = aiEqScore > 90 ? XP_REWARDS.SCENARIO_EXCELLENT - XP_REWARDS.SCENARIO_COMPLETE : 0;
     const a = Math.floor(extra / 3);
     const reward = {
-      fluency: scenario.xpReward.fluency + a,
-      grammar: scenario.xpReward.grammar + a,
-      eq: scenario.xpReward.eq + (extra - 2 * a),
+      fluency: xpReward.fluency + a,
+      grammar: xpReward.grammar + a,
+      eq: xpReward.eq + (extra - 2 * a),
     };
-    const xpAwarded = scenario.xpReward.fluency + scenario.xpReward.grammar + scenario.xpReward.eq + extra;
+    const xpAwarded = xpReward.fluency + xpReward.grammar + xpReward.eq + extra;
 
-    user.emotionPassport.completedScenarios.push({
+    const completedScenarios = [...user.emotionPassport.completedScenarios, {
       scenarioId,
-      completedAt: new Date(),
+      completedAt: new Date().toISOString(),
       scoreAchieved: aiEqScore,
-    });
-    user.emotionPassport.stampCount = Math.min(12, user.emotionPassport.stampCount + 1);
+    }];
+    const stampCount = Math.min(12, user.emotionPassport.stampCount + 1);
+    const unlockedPersonas = [...user.unlockedPersonas];
 
-    if (user.emotionPassport.stampCount >= EMPATH_UNLOCK_STAMPS && !user.unlockedPersonas.includes('empath')) {
-      user.unlockedPersonas.push('empath');
+    if (stampCount >= EMPATH_UNLOCK_STAMPS && !unlockedPersonas.includes('empath')) {
+      unlockedPersonas.push('empath');
     }
 
-    await user.save();
-    await incrementUserXp(user._id.toString(), reward);
+    const { error: updateError } = await supabase
+      .from('gamer_users')
+      .update({
+        passport_completed: completedScenarios,
+        passport_stamp_count: stampCount,
+        unlocked_personas: unlockedPersonas,
+      })
+      .eq('id', req.gamer!.userId);
+    if (updateError) throw updateError;
+    await incrementUserXp(req.gamer!.userId, reward);
 
     const achievements: unknown[] = [];
-    if (user.emotionPassport.stampCount > 0 && user.emotionPassport.stampCount % 3 === 0) {
+    if (stampCount > 0 && stampCount % 3 === 0) {
       try {
-        const ach = await AchievementModel.create({
-          userId: user._id,
-          achievementId: `passport-milestone-${user.emotionPassport.stampCount}`,
+        const { data: ach, error: achError } = await supabase
+          .from('gamer_achievements')
+          .insert({
+          user_id: req.gamer!.userId,
+          achievement_id: `passport-milestone-${stampCount}`,
           title: 'Passport milestone',
-          description: `Collected ${user.emotionPassport.stampCount} emotion passport stamps.`,
+          description: `Collected ${stampCount} emotion passport stamps.`,
           category: 'passport',
-        });
-        achievements.push(ach.toObject());
-      } catch (err: unknown) {
-        const code = (err as { code?: number }).code;
-        if (code !== 11000) throw err;
+          })
+          .select('*')
+          .single();
+        if (achError) throw achError;
+        achievements.push(ach);
+      } catch {
+        // ignore duplicate achievement insert
       }
     }
 
     res.json({
       stampEarned: true,
-      newStampCount: user.emotionPassport.stampCount,
+      newStampCount: stampCount,
       xpAwarded,
       achievementUnlocked: achievements[0] ?? null,
     });
@@ -400,22 +514,24 @@ router.get('/leaderboard', async (req: Request, res: Response) => {
     const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10) || 20));
     const scope = String(req.query.scope ?? 'alltime') as 'weekly' | 'alltime';
 
-    const sortField: Record<string, SortOrder> =
-      scope === 'weekly' ? { 'weeklySnapshot.xpEarned': -1 } : { 'levels.composite': -1 };
+    const orderColumn = scope === 'weekly' ? 'weekly_xp_earned' : 'level_composite';
+    const { data: rows, error: rowsError } = await supabase
+      .from('gamer_users')
+      .select('*')
+      .eq('active_persona', persona)
+      .not('username', 'ilike', 'test%')
+      .not('username', 'ilike', 'demo%')
+      .order(orderColumn, { ascending: false })
+      .limit(limit);
+    if (rowsError) throw rowsError;
 
-    const rows = await UserModel.find({ activePersona: persona })
-      .sort(sortField)
-      .limit(limit)
-      .select({ username: 1, activePersona: 1, levels: 1, weeklySnapshot: 1 })
-      .lean();
-
-    const entries = rows.map((u, i) => ({
+    const entries = (rows ?? []).map((u, i) => ({
       rank: i + 1,
       username: u.username,
-      compositeLevel: u.levels.composite,
-      persona: u.activePersona,
+      compositeLevel: u.level_composite,
+      persona: u.active_persona,
       avatarInitial: u.username.charAt(0).toUpperCase(),
-      weeklyXp: u.weeklySnapshot?.xpEarned ?? 0,
+      weeklyXp: u.weekly_xp_earned ?? 0,
     }));
 
     res.json({ entries, scope, persona });
@@ -425,14 +541,9 @@ router.get('/leaderboard', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/streak/:userId', async (req: Request, res: Response) => {
+router.get('/streak/self', async (req: Request, res: Response) => {
   try {
-    const { userId } = req.params;
-    if (!userId || !assertSelf(req, userId)) {
-      forbid(res);
-      return;
-    }
-    const user = await UserModel.findById(userId).select({ streak: 1 }).lean();
+    const user = await getUserById(req.gamer!.userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
@@ -453,9 +564,14 @@ router.get('/streak/:userId', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/streak/self', async (req: Request, res: Response) => {
+router.get('/streak/:userId', async (req: Request, res: Response) => {
   try {
-    const user = await UserModel.findById(req.gamer!.userId).select({ streak: 1 }).lean();
+    const { userId } = req.params;
+    if (!userId || !assertSelf(req, userId)) {
+      forbid(res);
+      return;
+    }
+    const user = await getUserById(userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
@@ -485,22 +601,43 @@ router.post('/quiz/submit', async (req: Request, res: Response) => {
     }
     const { quizType, answers, sessionId } = parsed.data;
     const userId = req.gamer!.userId;
-    const ids = answers.map((a) => new mongoose.Types.ObjectId(a.questionId));
-    const questions = await QuestionBankModel.find({ _id: { $in: ids }, type: quizType }).lean();
-    if (questions.length === 0) {
+    const ids = answers.map((a) => String(a.questionId));
+    const dbIds = ids.filter((id) => isUuidLike(id));
+    const fallbackPool = quizType === 'grammar' ? FALLBACK_GRAMMAR_QUESTIONS : [];
+    const fallbackMap = new Map(
+      fallbackPool
+        .filter((q) => ids.includes(String(q.id)))
+        .map((q) => [String(q.id), q])
+    );
+
+    let questionRows: any[] = [];
+    if (dbIds.length > 0) {
+      const { data: questions, error: questionError } = await supabase
+        .from('gamer_questions')
+        .select('*')
+        .in('id', dbIds)
+        .eq('type', quizType);
+      if (questionError) throw questionError;
+      questionRows = Array.isArray(questions) ? questions : [];
+    }
+
+    if (questionRows.length === 0 && fallbackMap.size === 0) {
       res.status(404).json({ error: 'No questions found for submitted ids' });
       return;
     }
 
-    const qMap = new Map(questions.map((q) => [q._id.toString(), q]));
+    const qMap = new Map(questionRows.map((q) => [String(q.id), q]));
+    for (const [k, v] of fallbackMap.entries()) {
+      qMap.set(k, v);
+    }
     const graded = answers.map((a) => {
-      const q = qMap.get(a.questionId);
-      const correct = !!q && q.correctAnswer.trim() === a.userAnswer.trim();
+      const q = qMap.get(String(a.questionId));
+      const correct = !!q && String(q.correct_answer).trim() === a.userAnswer.trim();
       return {
         questionId: a.questionId,
         correct,
         userAnswer: a.userAnswer,
-        correctAnswer: q?.correctAnswer ?? '',
+        correctAnswer: q?.correct_answer ?? '',
       };
     });
 
@@ -512,39 +649,43 @@ router.post('/quiz/submit', async (req: Request, res: Response) => {
       xpAwarded += XP_REWARDS.QUIZ_PERFECT_SCORE;
     }
 
-    const sessionOid =
-      sessionId && mongoose.isValidObjectId(sessionId)
-        ? new mongoose.Types.ObjectId(sessionId)
-        : new mongoose.Types.ObjectId();
+    const sessionRef = sessionId ?? crypto.randomUUID();
 
-    await QuizResultModel.create({
-      userId: new mongoose.Types.ObjectId(userId),
-      sessionId: sessionOid,
-      quizType,
+    const { error: quizResultError } = await supabase.from('gamer_quiz_results').insert({
+      user_id: userId,
+      session_id: sessionRef,
+      quiz_type: quizType,
       questions: graded,
       score,
-      xpAwarded,
-      completedAt: new Date(),
+      xp_awarded: xpAwarded,
+      completed_at: new Date().toISOString(),
     });
+    if (quizResultError) throw quizResultError;
 
     const mistakesCreated: string[] = [];
     if (quizType === 'grammar') {
       for (const g of graded) {
         if (!g.correct) {
-          const q = qMap.get(g.questionId);
-          const m = await MistakeModel.create({
-            userId: new mongoose.Types.ObjectId(userId),
-            sessionId: sessionOid,
-            originalUtterance: g.userAnswer,
-            correctedForm: g.correctAnswer || '(see explanation)',
-            errorType: (q?.errorType as 'grammar' | 'vocabulary' | 'tense' | 'agreement' | 'other') ?? 'grammar',
-            errorTag: q?.explanation?.slice(0, 120) ?? 'quiz',
-            nextReviewDate: new Date(Date.now() + 86400000),
-            intervalDays: 1,
-            easeFactor: 2.5,
-            reviewCount: 0,
-          });
-          mistakesCreated.push(m._id.toString());
+          const q = qMap.get(String(g.questionId));
+          const { data: m, error: insertError } = await supabase
+            .from('gamer_mistakes')
+            .insert({
+              user_id: userId,
+              session_id: sessionRef,
+              original_utterance: g.userAnswer,
+              corrected_form: g.correctAnswer || '(see explanation)',
+              error_type:
+                (q?.error_type as 'grammar' | 'vocabulary' | 'tense' | 'agreement' | 'other') ?? 'grammar',
+              error_tag: (q?.explanation as string | undefined)?.slice(0, 120) ?? 'quiz',
+              next_review_date: new Date().toISOString(),
+              interval_days: 1,
+              ease_factor: 2.5,
+              review_count: 0,
+            })
+            .select('id')
+            .single();
+          if (insertError) throw insertError;
+          if (m?.id) mistakesCreated.push(m.id);
         }
       }
     }
@@ -553,20 +694,29 @@ router.post('/quiz/submit', async (req: Request, res: Response) => {
     await incrementUserXp(userId, track === 'grammar' ? { grammar: xpAwarded } : { eq: xpAwarded });
 
     res.json({ score, correctCount, xpAwarded, mistakesCreated });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : 'Server error';
-    res.status(500).json({ error: msg });
+  } catch (e: any) {
+    const msg =
+      (typeof e?.message === 'string' && e.message) ||
+      (typeof e?.error_description === 'string' && e.error_description) ||
+      (typeof e?.details === 'string' && e.details) ||
+      'Server error';
+    console.error('[quiz/submit] failed', {
+      message: msg,
+      code: e?.code,
+      hint: e?.hint,
+      details: e?.details,
+    });
+    res.status(500).json({
+      error: msg,
+      code: e?.code ?? null,
+      detail: e?.details ?? e?.hint ?? null,
+    });
   }
 });
 
-router.get('/weekly-report/:userId', async (req: Request, res: Response) => {
+router.get('/weekly-report/self', async (req: Request, res: Response) => {
   try {
-    const { userId } = req.params;
-    if (!userId || !assertSelf(req, userId)) {
-      forbid(res);
-      return;
-    }
-    const user = await UserModel.findById(userId).select({ weeklySnapshot: 1, xp: 1, levels: 1 }).lean();
+    const user = await getUserById(req.gamer!.userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
@@ -583,11 +733,14 @@ router.get('/weekly-report/:userId', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/weekly-report/self', async (req: Request, res: Response) => {
+router.get('/weekly-report/:userId', async (req: Request, res: Response) => {
   try {
-    const user = await UserModel.findById(req.gamer!.userId)
-      .select({ weeklySnapshot: 1, xp: 1, levels: 1 })
-      .lean();
+    const { userId } = req.params;
+    if (!userId || !assertSelf(req, userId)) {
+      forbid(res);
+      return;
+    }
+    const user = await getUserById(userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
@@ -612,7 +765,7 @@ router.put('/persona', async (req: Request, res: Response) => {
       return;
     }
     const { persona } = parsed.data;
-    const user = await UserModel.findById(req.gamer!.userId);
+    const user = await getUserById(req.gamer!.userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
@@ -621,14 +774,15 @@ router.put('/persona', async (req: Request, res: Response) => {
     const composite = user.levels.composite;
     const stamps = user.emotionPassport.stampCount;
 
+    const unlockedPersonas = [...user.unlockedPersonas];
     if (persona === 'storyteller' && composite >= PERSONA_UNLOCK_LEVEL.storyteller) {
-      if (!user.unlockedPersonas.includes('storyteller')) user.unlockedPersonas.push('storyteller');
+      if (!unlockedPersonas.includes('storyteller')) unlockedPersonas.push('storyteller');
     }
     if (persona === 'debater' && composite >= PERSONA_UNLOCK_LEVEL.debater) {
-      if (!user.unlockedPersonas.includes('debater')) user.unlockedPersonas.push('debater');
+      if (!unlockedPersonas.includes('debater')) unlockedPersonas.push('debater');
     }
     if (persona === 'empath' && stamps >= EMPATH_UNLOCK_STAMPS) {
-      if (!user.unlockedPersonas.includes('empath')) user.unlockedPersonas.push('empath');
+      if (!unlockedPersonas.includes('empath')) unlockedPersonas.push('empath');
     }
 
     const canEmpath = stamps >= EMPATH_UNLOCK_STAMPS;
@@ -640,14 +794,20 @@ router.put('/persona', async (req: Request, res: Response) => {
       (persona === 'debater' && canDebate) ||
       (persona === 'empath' && canEmpath);
 
-    if (!allowed || !user.unlockedPersonas.includes(persona)) {
+    if (!allowed || !unlockedPersonas.includes(persona)) {
       res.status(403).json({ error: 'Persona locked' });
       return;
     }
 
-    user.activePersona = persona;
-    await user.save();
-    res.json({ activePersona: user.activePersona });
+    const { error: updateError } = await supabase
+      .from('gamer_users')
+      .update({
+        unlocked_personas: unlockedPersonas,
+        active_persona: persona,
+      })
+      .eq('id', req.gamer!.userId);
+    if (updateError) throw updateError;
+    res.json({ activePersona: persona });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });
@@ -662,26 +822,33 @@ router.put('/coach-mode', async (req: Request, res: Response) => {
       return;
     }
     const { mode } = parsed.data;
-    const user = await UserModel.findById(req.gamer!.userId);
+    const user = await getUserById(req.gamer!.userId);
     if (!user) {
       res.status(404).json({ error: 'User not found' });
       return;
     }
     const c = user.levels.composite;
-    if (c >= COACH_MODE_MIN_COMPOSITE.strict && !user.unlockedCoachModes.includes('strict')) {
-      user.unlockedCoachModes.push('strict');
+    const unlockedCoachModes = [...user.unlockedCoachModes];
+    if (c >= COACH_MODE_MIN_COMPOSITE.strict && !unlockedCoachModes.includes('strict')) {
+      unlockedCoachModes.push('strict');
     }
-    if (c >= COACH_MODE_MIN_COMPOSITE.debate && !user.unlockedCoachModes.includes('debate')) {
-      user.unlockedCoachModes.push('debate');
+    if (c >= COACH_MODE_MIN_COMPOSITE.debate && !unlockedCoachModes.includes('debate')) {
+      unlockedCoachModes.push('debate');
     }
     const min = COACH_MODE_MIN_COMPOSITE[mode];
-    if (user.levels.composite < min || !user.unlockedCoachModes.includes(mode)) {
+    if (user.levels.composite < min || !unlockedCoachModes.includes(mode)) {
       res.status(403).json({ error: 'Coach mode locked' });
       return;
     }
-    user.activeCoachMode = mode;
-    await user.save();
-    res.json({ activeCoachMode: user.activeCoachMode });
+    const { error: updateError } = await supabase
+      .from('gamer_users')
+      .update({
+        unlocked_coach_modes: unlockedCoachModes,
+        active_coach_mode: mode,
+      })
+      .eq('id', req.gamer!.userId);
+    if (updateError) throw updateError;
+    res.json({ activeCoachMode: mode });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     res.status(500).json({ error: msg });

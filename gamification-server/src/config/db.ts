@@ -5,7 +5,7 @@ let connecting: Promise<typeof mongoose> | null = null;
 /**
  * Single shared connection for the gamification service process.
  */
-export async function connectDatabase(uri: string): Promise<typeof mongoose> {
+export async function connectDatabase(uri: string, dbName?: string): Promise<typeof mongoose> {
   if (mongoose.connection.readyState === 1) {
     return mongoose;
   }
@@ -14,6 +14,7 @@ export async function connectDatabase(uri: string): Promise<typeof mongoose> {
   }
   connecting = mongoose.connect(uri, {
     autoIndex: true,
+    dbName: dbName || undefined,
   });
   try {
     await connecting;
