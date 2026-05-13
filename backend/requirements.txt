@@ -1,0 +1,14 @@
+Flask
+Flask-Cors
+Flask-JWT-Extended
+Werkzeug
+requests
+nltk
+spacy
+en-core-web-sm
+language-tool-python
+pronouncing
+textstat
+python-dotenv
+pymongo
+bcrypt
