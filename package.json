@@ -1,0 +1,12 @@
+{
+  "name": "fyp-main",
+  "private": true,
+  "scripts": {
+    "start:frontend": "npm --prefix frontend start",
+    "start:gamification": "npm --prefix gamification-server run dev",
+    "start:all": "concurrently -n FRONTEND,NODE -c cyan,magenta \"npm run start:frontend\" \"npm run start:gamification\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
