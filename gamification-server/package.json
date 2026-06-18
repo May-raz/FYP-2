@@ -11,7 +11,8 @@
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "seed:demo": "tsx src/scripts/demoSeed.ts"
   },
   "engines": {
     "node": ">=18"

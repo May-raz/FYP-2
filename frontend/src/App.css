@@ -1825,6 +1825,57 @@ button:disabled, .btn-primary:disabled, .btn-secondary:disabled {
   margin-bottom: 10px;
 }
 
+.flashcard-front,
+.flashcard-back {
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.flashcard-hint {
+  opacity: 0.85;
+  font-size: 0.95rem;
+}
+
+.quiz-meta-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.pronunciation-practice .pronunciation-target-card,
+.pronunciation-practice .pronunciation-record-card {
+  border: 1px solid var(--border-color-light);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  background: var(--card-bg, rgba(255, 255, 255, 0.02));
+}
+
+.pronunciation-target-text {
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.pronunciation-feedback-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.pronunciation-metric-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.pronunciation-tts-error {
+  color: #dc2626;
+  margin-top: 8px;
+}
+
+.encouraging-feedback {
+  font-weight: 600;
+}
+
 .emotion-row {
   display: flex;
   justify-content: space-between;

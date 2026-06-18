@@ -4,99 +4,9 @@ import axios from 'axios';
 import './App.css';
 import { ChatEndModal } from './components/ChatEndModal.jsx';
 import {
-  getVoiceProfile,
-  pickVoiceForProfile,
   speakAssistantText,
+  stopAssistantSpeech as stopTts,
 } from './services/ttsService';
-
-/** Prefer higher-quality English voices when the browser exposes them (Chrome/Edge/Safari vary). */
-function pickBestEnglishVoice() {
-  if (typeof window === 'undefined' || !window.speechSynthesis) return null;
-  const voices = window.speechSynthesis.getVoices();
-  if (!voices?.length) return null;
-  const en = voices.filter(
-    (v) => v.lang && v.lang.toLowerCase().startsWith('en')
-  );
-  const pool = en.length ? en : voices;
-  const rank = (name, lang) => {
-    const n = (name || '').toLowerCase();
-    const l = (lang || '').toLowerCase();
-    let s = 0;
-    // Strong preference for natural-sounding female tutor voices.
-    if (n.includes('female')) s += 40;
-    if (n.includes('woman')) s += 30;
-    if (n.includes('google')) s += 55;
-    if (n.includes('natural') || n.includes('neural')) s += 45;
-    if (n.includes('premium')) s += 35;
-    if (n.includes('enhanced')) s += 25;
-    if (n.includes('samantha')) s += 28;
-    if (n.includes('alloy')) s += 12;
-    if (n.includes('nova')) s += 12;
-    if (n.includes('aaron')) s += 20;
-    if (n.includes('aria')) s += 26;
-    if (n.includes('jenny')) s += 26;
-    if (n.includes('zira')) s += 24;
-    if (n.includes('hazel')) s += 22;
-    if (n.includes('emma')) s += 32;
-    if (n.includes('female') || n.includes('samantha') || n.includes('jenny') || n.includes('aria') || n.includes('zira')) s += 20;
-    if (n.includes('male') || n.includes('guy') || n.includes('ryan') || n.includes('aaron')) s -= 10;
-    if (n.includes('guy')) s += 18;
-    if (n.includes('ryan')) s += 18;
-    if (n.includes('ava')) s += 20;
-    if (n.includes('zira')) s += 12;
-    if (n.includes('microsoft') && n.includes('online')) s += 30;
-    if (l.includes('en-us')) s += 8;
-    if (l.includes('en-gb')) s += 4;
-    return s;
-  };
-  return [...pool].sort(
-    (a, b) => rank(b.name, b.lang) - rank(a.name, a.lang)
-  )[0];
-}
-
-function pickCharacterVoice(characterId, profile) {
-  if (typeof window === 'undefined' || !window.speechSynthesis) return null;
-  const voices = window.speechSynthesis.getVoices();
-  if (!voices?.length) return null;
-  const normalizedId = String(characterId || '').toLowerCase();
-  const characterVoiceSignatures = {
-    einstein: { preferLang: ['en-gb', 'en-us'], mustInclude: ['aaron', 'daniel'], avoid: ['zira', 'jenny'] },
-    napoleon: { preferLang: ['en-gb', 'en-us'], mustInclude: ['david', 'mark', 'george'], avoid: ['samantha', 'zira'] },
-    shakespeare: { preferLang: ['en-gb'], mustInclude: ['arthur', 'daniel', 'google uk english'], avoid: ['zira', 'jenny'] },
-    sherlock: { preferLang: ['en-gb'], mustInclude: ['arthur', 'david'], avoid: ['samantha'] },
-    elonmusk: { preferLang: ['en-us'], mustInclude: ['guy', 'ryan', 'davis'], avoid: ['google uk english'] },
-    mariecurie: { preferLang: ['en-us', 'en-gb'], mustInclude: ['jenny', 'aria', 'samantha'], avoid: ['david', 'mark'] },
-    tesla: { preferLang: ['en-us', 'en-gb'], mustInclude: ['aaron', 'david'], avoid: ['zira', 'samantha'] },
-    abrahamlincoln: { preferLang: ['en-us'], mustInclude: ['davis', 'guy', 'mark'], avoid: ['jenny', 'aria'] },
-    cleopatra: { preferLang: ['en-gb', 'en-us'], mustInclude: ['aria', 'jenny', 'zira'], avoid: ['aaron', 'guy'] },
-  };
-  const signature = characterVoiceSignatures[normalizedId] || { preferLang: [], mustInclude: [], avoid: [] };
-  const hints = Array.isArray(profile?.preferredVoiceHints)
-    ? profile.preferredVoiceHints.map((h) => String(h || '').toLowerCase()).filter(Boolean)
-    : [];
-  const rank = (voice) => {
-    const name = String(voice?.name || '').toLowerCase();
-    const lang = String(voice?.lang || '').toLowerCase();
-    let score = lang.startsWith('en') ? 20 : 0;
-    signature.preferLang.forEach((langHint, idx) => {
-      if (lang.includes(langHint)) score += 40 - idx * 8;
-    });
-    signature.mustInclude.forEach((nameHint, idx) => {
-      if (name.includes(nameHint)) score += 70 - idx * 8;
-    });
-    signature.avoid.forEach((nameHint) => {
-      if (name.includes(nameHint)) score -= 40;
-    });
-    hints.forEach((hint, idx) => {
-      if (name.includes(hint)) score += 80 - idx * 10;
-    });
-    if (normalizedId === 'napoleon' && (name.includes('male') || name.includes('guy'))) score += 25;
-    if (normalizedId === 'cleopatra' && (name.includes('female') || name.includes('zira') || name.includes('aria'))) score += 25;
-    if (normalizedId === 'shakespeare' && lang.includes('en-gb')) score += 30;
-    return score;
-  };
-  return [...voices].sort((a, b) => rank(b) - rank(a))[0] || null;
-}
 
 /** Light cleanup for Web Speech API output (spacing + leading fillers). */
 function looksLikeQuestion(text) {
@@ -1308,49 +1218,131 @@ const LoginPage = () => {
   );
 };
 
-// FIX #3: Advanced Pronunciation Assessment Component
+// FIX #3: Interactive Pronunciation Practice
 const AdvancedPronunciationAssessment = ({ onClose }) => {
-  const [assessmentData, setAssessmentData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [targetPhrase, setTargetPhrase] = useState('');
+  const [transcript, setTranscript] = useState('');
+  const [assessment, setAssessment] = useState(null);
+  const [loadingPhrase, setLoadingPhrase] = useState(true);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isAssessing, setIsAssessing] = useState(false);
+  const [ttsError, setTtsError] = useState('');
+  const [error, setError] = useState('');
+  const mediaRecorderRef = useRef(null);
+  const streamRef = useRef(null);
+  const chunksRef = useRef([]);
 
-  useEffect(() => {
-    const fetchAssessment = async () => {
-      try {
-        setLoading(true);
-        const response = await axios.get('/api/pronunciation/advanced-assessment');
-        setAssessmentData(response.data);
-      } catch (err) {
-        setError(err.response?.data?.error || 'Failed to load assessment');
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchAssessment();
+  const loadPhrase = useCallback(async (current) => {
+    setLoadingPhrase(true);
+    setError('');
+    setAssessment(null);
+    setTranscript('');
+    try {
+      const query = current ? `?current=${encodeURIComponent(current)}` : '';
+      const response = await axios.get(`/api/pronunciation/practice-phrase${query}`);
+      setTargetPhrase(String(response.data?.phrase || ''));
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to load practice phrase');
+    } finally {
+      setLoadingPhrase(false);
+    }
   }, []);
 
-  if (loading) {
+  useEffect(() => {
+    loadPhrase();
+  }, [loadPhrase]);
+
+  const playTarget = useCallback(() => {
+    if (!targetPhrase) return;
+    setTtsError('');
+    speakAssistantText(targetPhrase, {
+      audioEnabled: true,
+      apiBaseUrl: API_BASE,
+      authHeaders,
+      characterId: 'emma',
+      challengeMode: false,
+      slow: true,
+      onError: (e) => {
+        const msg = String(e?.message || '');
+        setTtsError(msg.includes('unavailable') || msg.includes('not configured') ? 'Voice service temporarily unavailable.' : msg || 'Could not play audio.');
+      },
+    });
+  }, [targetPhrase]);
+
+  const stopRecording = useCallback(() => {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    setIsRecording(false);
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    setError('');
+    setAssessment(null);
+    setTranscript('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      chunksRef.current = [];
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (e) => {
+        if (e.data?.size) chunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        chunksRef.current = [];
+        if (!blob.size) {
+          setError('No audio captured. Please try again.');
+          return;
+        }
+        try {
+          const processed = await preprocessAudioBlob(blob);
+          const token = getStoredToken();
+          const form = new FormData();
+          form.append('audio', processed, 'speech.wav');
+          form.append('language', 'en');
+          const response = await fetch(`${API_BASE || ''}/api/speech/transcribe`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+            body: form,
+          });
+          if (!response.ok) throw new Error('Transcription failed');
+          const payload = await response.json();
+          const text = cleanVoiceTranscript(String(payload?.text ?? ''));
+          if (!text) throw new Error('No speech detected. Speak clearly and try again.');
+          setTranscript(text);
+          setIsAssessing(true);
+          const assessRes = await axios.post('/api/pronunciation/assess', {
+            target: targetPhrase,
+            transcript: text,
+          });
+          setAssessment(assessRes.data);
+        } catch (err) {
+          setError(err.response?.data?.error || err.message || 'Could not assess pronunciation');
+        } finally {
+          setIsAssessing(false);
+        }
+      };
+      recorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      setError('Microphone access is required for pronunciation practice.');
+    }
+  }, [targetPhrase]);
+
+  useEffect(() => () => stopRecording(), [stopRecording]);
+
+  if (loadingPhrase) {
     return (
       <div className="assessment-modal">
         <div className="modal-content">
           <div className="loading-container">
             <div className="loading-spinner"></div>
-            <p>Loading advanced pronunciation assessment...</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="assessment-modal">
-        <div className="modal-content">
-          <div className="error-message">
-            <h3>Assessment Error</h3>
-            <p>{error}</p>
-            <button onClick={onClose} className="btn-primary">Close</button>
+            <p>Loading pronunciation practice...</p>
           </div>
         </div>
       </div>
@@ -1359,103 +1351,84 @@ const AdvancedPronunciationAssessment = ({ onClose }) => {
 
   return (
     <div className="assessment-modal">
-      <div className="modal-content advanced-assessment">
+      <div className="modal-content advanced-assessment pronunciation-practice">
         <div className="modal-header">
-          <h2>📊 Advanced Pronunciation Assessment</h2>
+          <h2>🎙️ Pronunciation Practice</h2>
           <button onClick={onClose} className="close-button">×</button>
         </div>
-        
+
         <div className="assessment-content">
-          <div className="score-section">
-            <div className="overall-score">
+          <div className="pronunciation-target-card">
+            <h3>Say this phrase</h3>
+            <p className="partner-summary-text pronunciation-target-text">{targetPhrase}</p>
+            <div className="summary-actions">
+              <button type="button" className="btn-primary" onClick={playTarget}>🔊 Hear Emma</button>
+              <button type="button" className="btn-secondary" onClick={() => loadPhrase(targetPhrase)}>➡️ New phrase</button>
+            </div>
+            {ttsError ? <p className="pronunciation-tts-error">{ttsError}</p> : null}
+          </div>
+
+          <div className="pronunciation-record-card">
+            <h3>Your turn</h3>
+            <p>Record yourself, then get pronunciation feedback (not grammar-only).</p>
+            <div className="summary-actions">
+              {!isRecording ? (
+                <button type="button" className="btn-primary" onClick={startRecording} disabled={isAssessing}>
+                  🎤 Start recording
+                </button>
+              ) : (
+                <button type="button" className="btn-secondary" onClick={stopRecording}>
+                  ⏹ Stop & assess
+                </button>
+              )}
+              <button type="button" className="btn-secondary" onClick={() => { setTranscript(''); setAssessment(null); setError(''); }}>
+                🔁 Retry phrase
+              </button>
+            </div>
+            {isAssessing ? <p>Analyzing your pronunciation...</p> : null}
+            {transcript ? <p><strong>You said:</strong> {transcript}</p> : null}
+            {error ? <p className="pronunciation-tts-error">{error}</p> : null}
+          </div>
+
+          {assessment && (
+            <div className="pronunciation-feedback-grid">
               <div className="score-circle large">
-                <span className="score">{assessmentData.overall_score}</span>
-                <span className="label">Overall Score</span>
+                <span className="score">{Math.round(assessment.score ?? 0)}</span>
+                <span className="label">Score</span>
               </div>
-              <div className="trend-indicator">
-                <span className={`trend ${assessmentData.trend.toLowerCase()}`}>
-                  {assessmentData.trend === 'Improving' ? '📈' : 
-                   assessmentData.trend === 'Declining' ? '📉' : '📊'} {assessmentData.trend}
-                </span>
+              <div className="pronunciation-metric-row">
+                <span>Fluency: <strong>{Math.round(assessment.fluency ?? 0)}</strong></span>
+                <span>Accuracy: <strong>{Math.round(assessment.accuracy ?? 0)}</strong></span>
               </div>
-            </div>
-            
-            {assessmentData.recent_scores && (
-              <div className="score-history">
-                <h4>Recent Progress</h4>
-                <div className="score-chart">
-                  {assessmentData.recent_scores.map((score, index) => (
-                    <div key={index} className="score-bar">
-                      <div 
-                        className="score-fill pronunciation" 
-                        style={{height: `${Math.max(score, 10)}%`}}
-                        title={`Session ${index + 1}: ${score}%`}
-                      ></div>
-                    </div>
-                  ))}
+              <p className="encouraging-feedback">{assessment.encouragingFeedback}</p>
+              {!!assessment.problemWords?.length && (
+                <div className="analysis-section">
+                  <h4>Problem words</h4>
+                  <div className="word-tags">
+                    {assessment.problemWords.map((w) => <span key={w} className="word-tag">{w}</span>)}
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
-
-          <div className="analysis-grid">
-            <div className="analysis-section">
-              <h3>🎯 Areas for Improvement</h3>
-              <ul className="improvement-list">
-                {assessmentData.improvement_areas.map((area, index) => (
-                  <li key={index}>{area}</li>
-                ))}
-              </ul>
-            </div>
-
-            <div className="analysis-section">
-              <h3>💪 Your Strengths</h3>
-              <ul className="strengths-list">
-                {assessmentData.strengths.map((strength, index) => (
-                  <li key={index}>{strength}</li>
-                ))}
-              </ul>
-            </div>
-
-            {assessmentData.problem_sounds.length > 0 && (
-              <div className="analysis-section">
-                <h3>🔤 Problem Sounds</h3>
-                <div className="sound-tags">
-                  {assessmentData.problem_sounds.map((sound, index) => (
-                    <span key={index} className="sound-tag">{sound}</span>
-                  ))}
+              )}
+              {!!assessment.missingWords?.length && (
+                <p><strong>Missing:</strong> {assessment.missingWords.join(', ')}</p>
+              )}
+              {!!assessment.tips?.length && (
+                <div className="analysis-section">
+                  <h4>Tips</h4>
+                  <ul>{assessment.tips.map((t, i) => <li key={i}>{t}</li>)}</ul>
                 </div>
-              </div>
-            )}
-
-            {assessmentData.mispronounced_words.length > 0 && (
-              <div className="analysis-section">
-                <h3>📚 Words to Practice</h3>
-                <div className="word-tags">
-                  {assessmentData.mispronounced_words.map((word, index) => (
-                    <span key={index} className="word-tag">{word}</span>
-                  ))}
+              )}
+              {!!assessment.suggestedPractice?.length && (
+                <div className="analysis-section">
+                  <h4>Practice</h4>
+                  <ul>{assessment.suggestedPractice.map((p, i) => <li key={i}>{p}</li>)}</ul>
                 </div>
-              </div>
-            )}
-
-            <div className="analysis-section">
-              <h3>💡 Recommendations</h3>
-              <ul className="recommendations-list">
-                {assessmentData.recommendations.map((rec, index) => (
-                  <li key={index}>{rec}</li>
-                ))}
-              </ul>
+              )}
+              {assessment.correctedPhrase ? (
+                <p><strong>Target:</strong> {assessment.correctedPhrase}</p>
+              ) : null}
             </div>
-          </div>
-
-          <div className="detailed-analysis">
-            <h3>📋 Detailed Analysis</h3>
-            <p>{assessmentData.detailed_analysis}</p>
-            <div className="stats-summary">
-              <span>Sessions Analyzed: <strong>{assessmentData.sessions_analyzed}</strong></span>
-            </div>
-          </div>
+          )}
         </div>
       </div>
     </div>
@@ -2332,7 +2305,6 @@ const ChatPage = () => {
   const [liveAnalysis, setLiveAnalysis] = useState(null);
   const [isAnalyzingLive, setIsAnalyzingLive] = useState(false);
   const [emotionState, setEmotionState] = useState(null);
-  const [turnFeedback, setTurnFeedback] = useState(null);
   const [liveWpm, setLiveWpm] = useState(0);
   const [liveWpmLabel, setLiveWpmLabel] = useState('Moderate');
   const [characterLoadingLine, setCharacterLoadingLine] = useState('Emma is typing...');
@@ -2340,9 +2312,6 @@ const ChatPage = () => {
   const location = useLocation();
   const isHistoricalMode = location.pathname.startsWith('/chat/character');
   const messagesEndRef = useRef(null);
-  const preferredVoiceRef = useRef(null);
-  const ttsQueueRef = useRef([]);
-  const ttsSpeakingRef = useRef(false);
   const ttsGenerationRef = useRef(0);
   const isListeningRef = useRef(false);
   const messagesRef = useRef([]);
@@ -2417,40 +2386,45 @@ const ChatPage = () => {
 
   const buildSessionMistakes = useCallback((msgs) => {
     const out = [];
+    const seen = new Set();
     for (const m of msgs || []) {
-      if (m.type !== 'user') continue;
-      const raw = String(m.content || '').trim();
-      if (!raw) continue;
-      let corrected = raw;
-      if (/^[a-z]/.test(corrected)) corrected = corrected.charAt(0).toUpperCase() + corrected.slice(1);
-      corrected = corrected.replace(/\bi\b/g, 'I');
-      corrected = corrected.replace(/[.?!]+\s*$/, '').trim();
-      if (corrected) corrected = `${corrected}${looksLikeQuestion(corrected) ? '?' : '.'}`;
-      if (corrected !== raw) {
+      const corrections = m.chatFeedback?.corrections || m.corrections || [];
+      for (const c of corrections) {
+        const original = String(c.original || '').trim();
+        const corrected = String(c.corrected || '').trim();
+        if (!original || !corrected) continue;
+        if (original.toLowerCase() === corrected.toLowerCase()) continue;
+        const key = `${original}::${corrected}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
         out.push({
-          originalUtterance: raw,
+          originalUtterance: original,
           correctedForm: corrected,
-          errorType: 'grammar',
-          errorTag: 'chat_auto_correction',
+          errorType: c.type === 'pronunciation' || c.type === 'vocabulary' ? 'vocabulary' : 'grammar',
+          errorTag: `chat_${c.type || 'grammar'}`,
+          explanation: c.explanation,
+          focusWord: c.word,
         });
+        if (out.length >= 8) break;
       }
-      if (out.length >= 5) break;
-    }
-    if (out.length === 0) {
-      const firstUser = (msgs || []).find((m) => m.type === 'user' && String(m.content || '').trim());
-      if (firstUser) {
-        const text = String(firstUser.content || '').trim();
+      const tips = m.chatFeedback?.pronunciationTips || [];
+      for (const t of tips) {
+        const word = String(t.word || '').trim();
+        if (!word) continue;
+        const key = `pron:${word}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
         out.push({
-          originalUtterance: text,
-          correctedForm: (() => {
-            const normalized = String(text || '').replace(/[.?!]+\s*$/, '').trim();
-            if (!normalized) return text;
-            return `${normalized}${looksLikeQuestion(normalized) ? '?' : '.'}`;
-          })(),
-          errorType: 'grammar',
-          errorTag: 'chat_memory_seed',
+          originalUtterance: word,
+          correctedForm: word,
+          errorType: 'vocabulary',
+          errorTag: 'pronunciation_tip',
+          explanation: t.tip,
+          focusWord: word,
         });
+        if (out.length >= 8) break;
       }
+      if (out.length >= 8) break;
     }
     return out;
   }, []);
@@ -2592,34 +2566,8 @@ const ChatPage = () => {
   }, [isListening]);
 
   useEffect(() => {
-    const refreshVoice = () => {
-      const charId = isHistoricalMode && selectedCharacter?.id && selectedCharacter.id !== 'emma'
-        ? selectedCharacter.id
-        : 'emma';
-      const profile = getVoiceProfile(
-        charId,
-        Boolean(selectedCharacter?.challengeMode),
-        selectedCharacter?.ttsProfile
-      );
-      preferredVoiceRef.current = pickVoiceForProfile(profile);
-      preferredVoiceRef.currentProfile = profile;
-    };
-    refreshVoice();
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.onvoiceschanged = refreshVoice;
-    }
     return () => {
-      if ('speechSynthesis' in window) {
-        window.speechSynthesis.onvoiceschanged = null;
-      }
-    };
-  }, [isHistoricalMode, selectedCharacter]);
-
-  useEffect(() => {
-    return () => {
-      try {
-        window.speechSynthesis?.cancel();
-      } catch (_) { /* ignore */ }
+      stopTts();
       stopListening();
     };
   }, [stopListening]);
@@ -2659,27 +2607,26 @@ const ChatPage = () => {
   }, [messages]);
 
   const stopAssistantSpeech = () => {
-    ttsGenerationRef.current += 1;
-    ttsQueueRef.current = [];
-    ttsSpeakingRef.current = false;
-    try {
-      window.speechSynthesis?.cancel();
-    } catch (_) { /* ignore */ }
+    stopTts();
   };
 
-  // TTS: conversational reply only — swap provider in services/ttsService.js
+  // ElevenLabs TTS via backend — conversational reply text only
   const speakText = useCallback((text) => {
-    const profile = preferredVoiceRef.currentProfile || getVoiceProfile('emma');
+    const charId = isHistoricalMode && selectedCharacter?.id && selectedCharacter.id !== 'emma'
+      ? selectedCharacter.id
+      : 'emma';
     speakAssistantText(text, {
       audioEnabled,
-      voice: preferredVoiceRef.current,
-      profile,
+      apiBaseUrl: API_BASE,
+      authHeaders,
+      characterId: charId,
+      challengeMode: Boolean(selectedCharacter?.challengeMode),
       generationRef: ttsGenerationRef,
-      onError: (e) => console.warn('TTS Error:', e?.error || e),
+      onError: (e) => console.warn('TTS Error:', e?.message || e),
     });
-  }, [audioEnabled]);
+  }, [audioEnabled, isHistoricalMode, selectedCharacter]);
 
-  const addMessage = useCallback((content, type, analysis = null, accentFeedback = null, tutorFeedback = null, chatFeedback = null) => {
+  const addMessage = useCallback((content, type, analysis = null, accentFeedback = null, tutorFeedback = null) => {
     const newMessage = {
       id: Date.now() + Math.random(),
       content,
@@ -2687,7 +2634,6 @@ const ChatPage = () => {
       analysis,
       accentFeedback,
       tutorFeedback,
-      chatFeedback,
       timestamp: new Date()
     };
 
@@ -2864,7 +2810,7 @@ const ChatPage = () => {
       const reader = streamResp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let latestFeedback = null;
+      let lastChatFeedback = null;
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -2884,8 +2830,7 @@ const ChatPage = () => {
             if (payload?.final && payload?.response) {
               botResponse = String(payload.response);
               if (payload?.chatFeedback) {
-                latestFeedback = payload.chatFeedback;
-                setTurnFeedback(payload.chatFeedback);
+                lastChatFeedback = payload.chatFeedback;
               }
               if (payload?.emotionState) {
                 setEmotionState({
@@ -2913,7 +2858,35 @@ const ChatPage = () => {
         throw new Error('Empty reply');
       }
 
-      addMessage(botResponse, 'bot', null, null, null, latestFeedback);
+      if (lastChatFeedback) {
+        const current = [...messagesRef.current];
+        for (let i = current.length - 1; i >= 0; i -= 1) {
+          if (current[i].type === 'user') {
+            current[i] = { ...current[i], chatFeedback: lastChatFeedback };
+            messagesRef.current = current;
+            setMessages(current);
+            break;
+          }
+        }
+        const corrections = lastChatFeedback?.corrections || [];
+        if (corrections.length > 0) {
+          axios.post(
+            `${GAMIFICATION_BASE}/api/v1/gamification/flashcards/generate`,
+            {
+              limit: Math.min(3, corrections.length),
+              mistakes: corrections.map((c) => ({
+                original: c.original,
+                corrected: c.corrected,
+                type: c.type,
+                explanation: c.explanation,
+              })),
+            },
+            { headers: authHeaders(), timeout: 30000 }
+          ).catch(() => {});
+        }
+      }
+
+      addMessage(botResponse, 'bot');
       runLiveAnalysis(trimmed, botResponse).catch(() => {});
       setRetryCount(0);
 
@@ -3134,42 +3107,6 @@ const ChatPage = () => {
                 <div key={message.id} className={`message ${message.type}`}>
                   <div className="message-content">
                     <p>{message.content}</p>
-                    {message.type === 'bot' && message.chatFeedback && (
-                      <div className="message-feedback-panel">
-                        {message.chatFeedback.emotion?.detected && (
-                          <div className="feedback-chip emotion-chip">
-                            Mood: {message.chatFeedback.emotion.detected}
-                            {typeof message.chatFeedback.emotion.confidence === 'number' && (
-                              <span className="feedback-chip-meta">
-                                {' '}({Math.round(message.chatFeedback.emotion.confidence * 100)}%)
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {message.chatFeedback.conversationIntent && (
-                          <div className="feedback-chip intent-chip">
-                            Intent: {message.chatFeedback.conversationIntent.replace(/_/g, ' ')}
-                          </div>
-                        )}
-                        {(message.chatFeedback.corrections || []).map((c, idx) => (
-                          <div key={`corr-${message.id}-${idx}`} className="feedback-correction">
-                            <span className="error-label">Gentle fix</span>
-                            <p>
-                              <span className="grammar-suggestion">{c.corrected}</span>
-                              {c.explanation ? ` — ${c.explanation}` : ''}
-                            </p>
-                          </div>
-                        ))}
-                        {(message.chatFeedback.pronunciationTips || []).map((p, idx) => (
-                          <div key={`pron-${message.id}-${idx}`} className="feedback-pronunciation">
-                            <span className="practice-label">Pronunciation</span>
-                            <p>
-                              <strong>{p.word}</strong>: {p.tip}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    )}
                   </div>
                   <span className="message-time">
                     {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -3220,18 +3157,6 @@ const ChatPage = () => {
                 </p>
                 <div className="analysis-list-block">
                   <h4>Emotion Panel</h4>
-                  {turnFeedback?.emotion?.detected && (
-                    <div className="emotion-row">
-                      <span>Detected mood</span>
-                      <span className="emotion-pill neutral">{turnFeedback.emotion.detected}</span>
-                    </div>
-                  )}
-                  {turnFeedback?.conversationIntent && (
-                    <div className="emotion-row">
-                      <span>Intent</span>
-                      <span className="emotion-pill neutral">{turnFeedback.conversationIntent.replace(/_/g, ' ')}</span>
-                    </div>
-                  )}
                   {[
                     ['Confidence', emotionState?.confidence, 'good'],
                     ['Nervousness', emotionState?.nervousness, (emotionState?.nervousness ?? 0) > 60 ? 'bad' : 'neutral'],
@@ -3250,7 +3175,6 @@ const ChatPage = () => {
                 <p className="chat-analysis-summary">{liveAnalysis.summary}</p>
                 <div className="chat-analysis-meta">
                   <span className="analysis-pill">{`Tone: ${liveAnalysis.tone || 'neutral'}`}</span>
-                  <span className="analysis-pill">{`Intent: ${liveAnalysis.intent || 'conversation'}`}</span>
                   <span className="analysis-pill">{`Confidence: ${Math.round(Number(liveAnalysis.confidence || 0) * 100)}%`}</span>
                 </div>
                 <div className="analysis-list-block">
@@ -3271,18 +3195,6 @@ const ChatPage = () => {
                 </div>
                 <div className="analysis-list-block">
                   <h4>Emotion Panel</h4>
-                  {turnFeedback?.emotion?.detected && (
-                    <div className="emotion-row">
-                      <span>Detected mood</span>
-                      <span className="emotion-pill neutral">{turnFeedback.emotion.detected}</span>
-                    </div>
-                  )}
-                  {turnFeedback?.conversationIntent && (
-                    <div className="emotion-row">
-                      <span>Intent</span>
-                      <span className="emotion-pill neutral">{turnFeedback.conversationIntent.replace(/_/g, ' ')}</span>
-                    </div>
-                  )}
                   {[
                     ['Confidence', emotionState?.confidence, 'good'],
                     ['Nervousness', emotionState?.nervousness, (emotionState?.nervousness ?? 0) > 60 ? 'bad' : 'neutral'],
@@ -3752,22 +3664,25 @@ const FlashcardsPage = () => {
   const [lastSpokenText, setLastSpokenText] = useState('');
   const [reviewSaving, setReviewSaving] = useState(false);
   const [sessionStats, setSessionStats] = useState({ reviewed: 0, easy: 0, medium: 0, hard: 0 });
+  const [generating, setGenerating] = useState(false);
   const navigate = useNavigate();
 
   const speak = useCallback((text, slow = false) => {
-    if (!('speechSynthesis' in window)) return;
     const content = String(text || '').trim();
     if (!content) {
       alert('No pronunciation text is available for this card yet.');
       return;
     }
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(content);
-    u.lang = 'en-US';
-    u.rate = slow ? 0.78 : 0.98;
-    u.pitch = 1.0;
     setLastSpokenText(content);
-    window.speechSynthesis.speak(u);
+    speakAssistantText(content, {
+      audioEnabled: true,
+      apiBaseUrl: API_BASE,
+      authHeaders,
+      characterId: 'emma',
+      challengeMode: false,
+      slow,
+      onError: (e) => console.warn('Flashcard TTS error:', e?.message || e),
+    });
   }, []);
 
   const refresh = useCallback(async () => {
@@ -3785,6 +3700,23 @@ const FlashcardsPage = () => {
       setLoading(false);
     }
   }, [activeCardId]);
+
+  const regenerate = useCallback(async () => {
+    setGenerating(true);
+    try {
+      await axios.post(
+        `${GAMIFICATION_BASE}/api/v1/gamification/flashcards/generate`,
+        { limit: 8 },
+        { headers: authHeaders(), timeout: 45000 }
+      );
+      await refresh();
+    } catch (err) {
+      console.error('Flashcard generation failed:', err);
+      alert(err?.response?.data?.error || 'Could not generate flashcards right now.');
+    } finally {
+      setGenerating(false);
+    }
+  }, [refresh]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -3830,7 +3762,12 @@ const FlashcardsPage = () => {
     <div className="dashboard">
       <header className="dashboard-header">
         <div className="header-content"><h1>🃏 Flashcards</h1></div>
-        <div className="header-actions"><button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button></div>
+        <div className="header-actions">
+          <button className="btn-secondary" disabled={generating} onClick={regenerate}>
+            {generating ? 'Generating...' : 'Regenerate'}
+          </button>
+          <button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button>
+        </div>
       </header>
       <div className="stats-overview">
         {loading ? <p>Loading due flashcards...</p> : cards.length === 0 ? (
@@ -3838,8 +3775,11 @@ const FlashcardsPage = () => {
             <div className="empty-state-icon">✅</div>
             <div className="empty-state-title">No flashcards due right now</div>
             <div className="empty-state-description">
-              Great consistency. Keep chatting to generate smart review cards from new speaking mistakes.
+              Chat with Emma to build cards from real mistakes, or generate a starter deck now.
             </div>
+            <button className="btn-primary" style={{ marginTop: 16 }} disabled={generating} onClick={regenerate}>
+              {generating ? 'Generating...' : 'Generate flashcards'}
+            </button>
           </div>
         ) : (
           <>
@@ -3876,14 +3816,15 @@ const FlashcardsPage = () => {
                     <span className="analysis-pill">{`Review #${activeCard.reviewCount || 0}`}</span>
                     <span className="analysis-pill">{`Focus: ${activeCard.focusWord || 'clarity'}`}</span>
                   </div>
-                  <h3>What you said</h3>
-                  <p className="partner-summary-text">"{activeCard.originalUtterance}"</p>
-                  <h3>Why it needs correction</h3>
-                  <p>{activeCard.whyIncorrect}</p>
+                  <h3>Practice prompt</h3>
+                  <p className="partner-summary-text flashcard-front">{activeCard.cardFront || activeCard.whatIncorrect}</p>
                   {revealAnswer && (
                     <>
-                      <h3>Improved sentence</h3>
-                      <p className="partner-summary-text">"{activeCard.improvedPhrasing || activeCard.correctedForm}"</p>
+                      <h3>Answer</h3>
+                      <p className="partner-summary-text flashcard-back">{activeCard.cardBack || activeCard.improvedPhrasing || activeCard.correctedForm}</p>
+                      {activeCard.cardExplanation ? (
+                        <p><strong>Why:</strong> {activeCard.cardExplanation}</p>
+                      ) : null}
                       {!!activeCard.addedWords?.length && (
                         <p>{`Added words: ${activeCard.addedWords.join(', ')}`}</p>
                       )}
@@ -3933,22 +3874,28 @@ const QuizPage = () => {
   const [answers, setAnswers] = useState({});
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [difficulty, setDifficulty] = useState(0);
   const navigate = useNavigate();
 
+  const loadQuestions = useCallback(async () => {
+    setLoading(true);
+    setResult(null);
+    setAnswers({});
+    try {
+      const difficultyQuery = difficulty > 0 ? `&difficulty=${difficulty}` : '';
+      const res = await axios.get(
+        `${GAMIFICATION_BASE}/api/v1/gamification/quiz/questions?quizType=grammar&limit=10${difficultyQuery}`,
+        { headers: authHeaders(), timeout: 45000 }
+      );
+      setQuestions(res.data?.questions || []);
+    } finally {
+      setLoading(false);
+    }
+  }, [difficulty]);
+
   useEffect(() => {
-    const run = async () => {
-      try {
-        const res = await axios.get(
-          `${GAMIFICATION_BASE}/api/v1/gamification/quiz/questions?quizType=grammar&limit=5`,
-          { headers: authHeaders() }
-        );
-        setQuestions(res.data?.questions || []);
-      } finally {
-        setLoading(false);
-      }
-    };
-    run();
-  }, []);
+    loadQuestions();
+  }, [loadQuestions]);
 
   const submit = async () => {
     const normalizedAnswers = questions
@@ -3983,13 +3930,31 @@ const QuizPage = () => {
     <div className="dashboard">
       <header className="dashboard-header">
         <div className="header-content"><h1>🧠 Grammar Quiz</h1></div>
-        <div className="header-actions"><button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button></div>
+        <div className="header-actions">
+          <select
+            className="btn-secondary"
+            value={difficulty}
+            onChange={(e) => setDifficulty(Number(e.target.value))}
+            aria-label="Difficulty"
+          >
+            <option value={0}>All levels</option>
+            <option value={1}>Beginner</option>
+            <option value={2}>Intermediate</option>
+            <option value={3}>Advanced</option>
+          </select>
+          <button className="btn-secondary" onClick={loadQuestions}>New quiz</button>
+          <button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button>
+        </div>
       </header>
       <div className="stats-overview">
         {loading ? <p>Loading questions...</p> : questions.length === 0 ? <p>No quiz questions available yet.</p> : questions.map((q, idx) => {
           const qid = q?.id || q?._id || `${idx}`;
           return (
           <div className="profile-section" key={qid}>
+            <div className="quiz-meta-row">
+              <span className="analysis-pill">{q.difficultyLabel || `Level ${q.difficulty || 2}`}</span>
+              <span className="analysis-pill">{q.category || 'grammar'}</span>
+            </div>
             <h3>Q{idx + 1}. {q.questionText}</h3>
             <div className="action-cards">
               {(q.options || []).map((opt) => (

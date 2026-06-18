@@ -171,16 +171,20 @@ Adaptive coaching (tone only, not lecture): ${adaptiveInstruction}
 ${jsonRules}`;
   }
 
-  return `You are Emma — a warm, friendly English conversation partner (like a supportive friend who happens to help with English).
+  return `You are Emma — the user's close English-speaking friend (warm, curious, encouraging).
 
-Emma's style:
-- Sound natural, curious, and conversational — NOT like a grammar textbook.
-- React to what the user actually said before moving on.
-- Use modern everyday English only (no archaic words).
-- Keep "reply" to 1-3 short sentences unless the user wants detail.
-- Invite the user to keep talking with a light follow-up when appropriate.
+Emma's personality:
+- Talk like a real friend: react naturally, show interest, use casual modern English.
+- Be supportive without sounding like a teacher or examiner.
+- Never say "Correction:", "You should say", "Grammar mistake", or lecture about rules in "reply".
+- Never use bullet lists or lesson formatting in "reply".
+- Ask friendly follow-up questions to keep the conversation going.
+- If the user seems nervous — be extra gentle. If confident — be playful and engaged.
+- Keep "reply" to 1-3 short sentences unless they want more detail.
 
-Adaptive coaching (tone only): ${adaptiveInstruction}
+All grammar/pronunciation feedback belongs ONLY in the JSON "corrections" and "pronunciationTips" fields — never in "reply".
+
+Adaptive tone (internal): ${adaptiveInstruction}
 ${jsonRules}`;
 }
 
@@ -247,22 +251,118 @@ export function enrichWithRuleCorrections(
   userMessage: string,
   ruleIssue: string | null
 ): StructuredChatResponse {
-  if (!ruleIssue || structured.corrections.length > 0) return structured;
-  const fixed = userMessage
-    .replace(/\bi\b/g, 'I')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/[.?!]*$/, '') + (/[?]$/.test(userMessage.trim()) ? '?' : '.');
-  if (fixed === userMessage.trim()) return structured;
+  let result = structured;
+  if (ruleIssue && result.corrections.length === 0) {
+    const fixed = userMessage
+      .replace(/\bi\b/g, 'I')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/[.?!]*$/, '') + (/[?]$/.test(userMessage.trim()) ? '?' : '.');
+    if (fixed !== userMessage.trim()) {
+      result = {
+        ...result,
+        corrections: [
+          {
+            original: userMessage.trim(),
+            corrected: fixed,
+            type: 'grammar',
+            explanation: ruleIssue,
+          },
+        ],
+      };
+    }
+  }
+  return applyHeuristicCorrections(result, userMessage);
+}
+
+const HEURISTIC_PATTERNS: Array<{
+  test: RegExp;
+  correct: (m: RegExpMatchArray, raw: string) => string;
+  type: ChatCorrection['type'];
+  explanation: string;
+}> = [
+  {
+    test: /\bi am agree\b/i,
+    correct: () => 'I agree',
+    type: 'grammar',
+    explanation: 'Do not use "am" before "agree".',
+  },
+  {
+    test: /\b(he|she|it)\s+go\b/i,
+    correct: (m, raw) => raw.replace(/\b(he|she|it)\s+go\b/i, `${m[1]} goes`),
+    type: 'grammar',
+    explanation: 'Use goes with he/she/it in present simple.',
+  },
+  {
+    test: /\bi have went\b/i,
+    correct: () => 'I went',
+    type: 'grammar',
+    explanation: 'Past simple of go is went, not have went.',
+  },
+  {
+    test: /\bdid a mistake\b/i,
+    correct: () => 'made a mistake',
+    type: 'vocabulary',
+    explanation: 'Collocation: make a mistake.',
+  },
+  {
+    test: /\bvery like\b/i,
+    correct: (_m, raw) => raw.replace(/\bvery like\b/i, 'like').replace(/[.?!]*$/, '') + ' very much.',
+    type: 'grammar',
+    explanation: 'Use "very much" after the object.',
+  },
+  {
+    test: /\b(he|she|it)\s+don't\b/i,
+    correct: (m, raw) => raw.replace(/\b(he|she|it)\s+don't\b/i, `${m[1]} doesn't`),
+    type: 'grammar',
+    explanation: 'Use doesn\'t with he/she/it.',
+  },
+  {
+    test: /\bmore (tall|easy|fast)\b/i,
+    correct: (m, raw) => {
+      const map: Record<string, string> = { tall: 'taller', easy: 'easier', fast: 'faster' };
+      return raw.replace(m[0], map[m[1].toLowerCase()] ?? m[1]);
+    },
+    type: 'grammar',
+    explanation: 'Use -er comparative for short adjectives.',
+  },
+  {
+    test: /\bi am (boring|exiting)\b/i,
+    correct: (m, raw) => raw.replace(m[0], m[1].toLowerCase() === 'boring' ? 'I am bored' : 'I am excited'),
+    type: 'vocabulary',
+    explanation: 'Use bored/excited for feelings.',
+  },
+];
+
+export function applyHeuristicCorrections(
+  structured: StructuredChatResponse,
+  userMessage: string
+): StructuredChatResponse {
+  const raw = userMessage.trim();
+  if (!raw) return structured;
+  const existing = new Set(
+    structured.corrections.map((c) => `${c.original.toLowerCase()}::${c.corrected.toLowerCase()}`)
+  );
+  const added: ChatCorrection[] = [];
+  for (const pattern of HEURISTIC_PATTERNS) {
+    const match = raw.match(pattern.test);
+    if (!match) continue;
+    const corrected = pattern.correct(match, raw).trim();
+    const original = match[0];
+    const key = `${original.toLowerCase()}::${corrected.toLowerCase()}`;
+    if (existing.has(key) || original.toLowerCase() === corrected.toLowerCase()) continue;
+    existing.add(key);
+    added.push({
+      original,
+      corrected,
+      type: pattern.type,
+      explanation: pattern.explanation,
+    });
+    if (structured.corrections.length + added.length >= 2) break;
+  }
+  if (!added.length) return structured;
   return {
     ...structured,
-    corrections: [
-      {
-        original: userMessage.trim(),
-        corrected: fixed,
-        type: 'grammar',
-        explanation: ruleIssue,
-      },
-    ],
+    corrections: [...structured.corrections, ...added].slice(0, 2),
   };
 }

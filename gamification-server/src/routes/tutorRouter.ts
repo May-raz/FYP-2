@@ -20,6 +20,13 @@ import {
   parseStructuredChatResponse,
   type StructuredChatResponse,
 } from '../services/chatResponseService';
+import { synthesizeSpeechWithElevenLabs } from '../services/elevenLabsService';
+import {
+  assessPronunciation,
+  listPracticePhrases,
+  pickPracticePhrase,
+} from '../services/pronunciationAssessmentService';
+import { getVoiceProfile } from '../config/voiceConfig';
 
 const router = Router();
 const transcriptionUpload = multer({
@@ -475,6 +482,61 @@ router.post('/speech/transcribe', (req: Request, res: Response) => {
   });
 });
 
+/** ElevenLabs TTS — returns audio/mpeg for the frontend to play */
+router.post('/speech/synthesize', async (req: Request, res: Response) => {
+  try {
+    const text = String(req.body?.text ?? '').trim();
+    const characterId = req.body?.characterId ?? 'emma';
+    const challengeMode = Boolean(req.body?.challengeMode);
+    const slow = Boolean(req.body?.slow);
+
+    if (!text) {
+      res.status(400).json({ error: 'text is required' });
+      return;
+    }
+
+    const result = await synthesizeSpeechWithElevenLabs({
+      text,
+      characterId,
+      challengeMode,
+      slow,
+    });
+
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Voice-Key', result.voiceKey);
+    res.setHeader('X-Voice-Id', result.voiceId);
+    res.send(result.audio);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Speech synthesis failed';
+    const status = message.includes('ELEVENLABS_API_KEY') || message.includes('not configured') ? 503 : 500;
+    const clientMessage = status === 503 ? 'Voice service temporarily unavailable.' : message;
+    console.warn('[elevenlabs] synthesize error:', message);
+    res.status(status).json({ error: clientMessage });
+  }
+});
+
+/** Voice config metadata (no secrets) — helps verify setup */
+router.get('/speech/voices', async (_req: Request, res: Response) => {
+  const keys = [
+    'emma', 'einstein', 'shakespeare', 'sherlock', 'napoleon',
+    'mariecurie', 'tesla', 'abrahamlincoln', 'cleopatra', 'elonmusk', 'challenge',
+  ] as const;
+  res.json({
+    provider: 'elevenlabs',
+    voices: keys.map((key) => {
+      const p = key === 'challenge' ? getVoiceProfile(null, true) : getVoiceProfile(key, false);
+      return {
+        key,
+        label: p.label,
+        voiceId: p.voiceId,
+        recommendedLibraryVoice: p.recommendedLibraryVoice,
+        modelId: p.modelId,
+      };
+    }),
+  });
+});
+
 router.get('/user/profile', async (req: Request, res: Response) => {
   const username = (req as Request & { tutorUser?: string }).tutorUser!;
   const profile = await loadProfile(username);
@@ -851,10 +913,8 @@ router.post('/chat/partner/stream', async (req: Request, res: Response) => {
     }
   }
 
-  if (!characterMode) {
-    const issue = detectEnglishRuleIssue(message);
-    chatPayload = enrichWithRuleCorrections(chatPayload, message, issue);
-  }
+  const issue = detectEnglishRuleIssue(message);
+  chatPayload = enrichWithRuleCorrections(chatPayload, message, issue);
 
   const reply = chatPayload.reply;
 
@@ -1144,18 +1204,40 @@ router.get('/chat/emotion-summary/:sessionId', async (req: Request, res: Respons
   });
 });
 
+router.get('/pronunciation/practice-phrase', (_req: Request, res: Response) => {
+  const current = String(_req.query?.current ?? '').trim();
+  res.json({
+    phrase: pickPracticePhrase(current || undefined),
+    phrases: listPracticePhrases(),
+  });
+});
+
+router.post('/pronunciation/assess', async (req: Request, res: Response) => {
+  try {
+    const target = String(req.body?.target ?? '').trim();
+    const transcript = String(req.body?.transcript ?? '').trim();
+    if (!target) {
+      res.status(400).json({ error: 'target phrase is required' });
+      return;
+    }
+    if (!transcript) {
+      res.status(400).json({ error: 'transcript is required — record your voice first' });
+      return;
+    }
+    const assessment = await assessPronunciation(target, transcript);
+    res.json(assessment);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Pronunciation assessment failed';
+    res.status(500).json({ error: message });
+  }
+});
+
 router.get('/pronunciation/advanced-assessment', async (_req: Request, res: Response) => {
   res.json({
-    overall_score: 0,
-    trend: 'Stable',
-    recent_scores: [],
-    improvement_areas: ['Continue practicing daily speaking.'],
-    strengths: ['You are engaging with the platform.'],
-    problem_sounds: [],
-    mispronounced_words: [],
-    recommendations: ['Try short daily speaking sessions.'],
-    detailed_analysis: 'Assessment updates as more speaking data is collected.',
-    sessions_analyzed: 0,
+    mode: 'interactive_practice',
+    phrase: pickPracticePhrase(),
+    phrases: listPracticePhrases(),
+    message: 'Use pronunciation practice to record, transcribe, and get feedback.',
   });
 });
 

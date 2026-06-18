@@ -7,6 +7,15 @@ import { MistakeModel } from '../models/Mistake';
 import { QuestionBankModel } from '../models/QuestionBank';
 import { QuizResultModel } from '../models/QuizResult';
 import { GamificationSessionModel } from '../models/Session';
+import { runFullDemoSeed, isJunkMistake } from '../services/demoSeedService';
+import {
+  ensureQuestionBankSeeded,
+  generateFlashcardsWithLlm,
+  generateQuizQuestionsWithLlm,
+  getRecentQuizQuestionTexts,
+  isLowValueCard,
+  persistFlashcards,
+} from '../services/learningContentService';
 
 const router = Router();
 router.use(requireAuth);
@@ -88,8 +97,43 @@ export function deriveCardInsights(m: any) {
   return { original, corrected, cardType, focusWord, errorReason, tokenDiff };
 }
 
+function subtypeToCardType(subtype: string): CardKind {
+  const map: Record<string, CardKind> = {
+    vocabulary: 'vocabulary_review',
+    pronunciation: 'pronunciation_review',
+    grammar_correction: 'grammar_correction',
+    sentence_improvement: 'sentence_improvement',
+    fill_blank: 'grammar_correction',
+    choose_sentence: 'grammar_correction',
+    contextual: 'contextual_usage',
+  };
+  return map[subtype] ?? 'grammar_correction';
+}
+
+function isMeaningfulCard(m: any): boolean {
+  if (isJunkMistake(m)) return false;
+  const front = String(m.cardFront ?? '').trim();
+  const back = String(m.cardBack ?? '').trim();
+  if (front && back && front !== back) return true;
+  const original = String(m.originalUtterance ?? '').trim();
+  const corrected = String(m.correctedForm ?? '').trim();
+  return !isLowValueCard(original, corrected);
+}
+
 function toCard(m: any) {
   const { original, corrected, cardType, focusWord, errorReason, tokenDiff } = deriveCardInsights(m);
+  const storedFront = String(m.cardFront ?? '').trim();
+  const storedBack = String(m.cardBack ?? '').trim();
+  const storedExplanation = String(m.cardExplanation ?? '').trim();
+  const resolvedSubtype = String(m.cardSubtype ?? '').trim();
+  const resolvedCardType = resolvedSubtype ? subtypeToCardType(resolvedSubtype) : cardType;
+  const displayFront = storedFront || (resolvedCardType === 'pronunciation_review' && focusWord
+    ? `Pronounce: ${focusWord}`
+    : original !== corrected
+      ? `Improve: "${original}"`
+      : storedFront || original);
+  const displayBack = storedBack || corrected;
+  const displayExplanation = storedExplanation || errorReason;
   return {
     _id: String(m._id),
     userId: String(m.userId),
@@ -103,12 +147,16 @@ function toCard(m: any) {
     easeFactor: m.easeFactor,
     reviewCount: m.reviewCount,
     lastReviewResult: m.lastReviewResult ?? null,
-    cardType,
-    focusWord,
-    whatIncorrect: original,
-    whyIncorrect: errorReason,
-    correctedSentence: corrected,
-    improvedPhrasing: corrected,
+    cardType: resolvedCardType,
+    cardSubtype: resolvedSubtype || resolvedCardType,
+    focusWord: String(m.focusWord ?? focusWord ?? ''),
+    cardFront: displayFront,
+    cardBack: displayBack,
+    cardExplanation: displayExplanation,
+    whatIncorrect: displayFront,
+    whyIncorrect: displayExplanation,
+    correctedSentence: displayBack,
+    improvedPhrasing: displayBack,
     addedWords: tokenDiff.added.slice(0, 4),
     removedWords: tokenDiff.removed.slice(0, 4),
   };
@@ -222,14 +270,47 @@ router.get('/leaderboard', async (req: Request, res: Response) => {
 
 router.get('/flashcards/due/me', async (req: Request, res: Response) => {
   const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? '10'), 10) || 10));
-  const cards = await MistakeModel.find({
-    userId: new mongoose.Types.ObjectId(req.gamer!.userId),
+  const userId = new mongoose.Types.ObjectId(req.gamer!.userId);
+
+  let cards = await MistakeModel.find({
+    userId,
     nextReviewDate: { $lte: new Date() },
   })
     .sort({ nextReviewDate: 1, reviewCount: -1, easeFactor: 1 })
-    .limit(Math.max(limit * 2, limit))
+    .limit(Math.max(limit * 3, limit))
     .lean();
-  const enriched = cards.map(toCard);
+
+  const meaningful = cards.filter(isMeaningfulCard);
+  if (meaningful.length < Math.min(4, limit)) {
+    const recentMistakes = await MistakeModel.find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(12)
+      .lean();
+    const sessionMistakes = recentMistakes
+      .filter((m) => !isLowValueCard(String(m.originalUtterance), String(m.correctedForm)))
+      .map((m) => ({
+        original: m.originalUtterance,
+        corrected: m.correctedForm,
+        type: m.errorType,
+        explanation: m.cardExplanation,
+        word: m.focusWord,
+      }));
+    const generated = await generateFlashcardsWithLlm({
+      userId: String(userId),
+      mistakesFromSession: sessionMistakes,
+      limit: Math.max(6, limit),
+    });
+    await persistFlashcards(userId, generated);
+    cards = await MistakeModel.find({
+      userId,
+      nextReviewDate: { $lte: new Date() },
+    })
+      .sort({ nextReviewDate: 1, reviewCount: -1, easeFactor: 1 })
+      .limit(Math.max(limit * 3, limit))
+      .lean();
+  }
+
+  const enriched = cards.filter(isMeaningfulCard).map(toCard);
   const prioritized = enriched
     .sort((a: any, b: any) => computePriorityScore(b) - computePriorityScore(a))
     .slice(0, limit);
@@ -240,6 +321,51 @@ router.get('/flashcards/due/me', async (req: Request, res: Response) => {
     highPriority: prioritized.filter((c: any) => (c.lastReviewResult === 'incorrect' || c.lastReviewResult === 'hard')).length,
   };
   res.json({ cards: prioritized, summary });
+});
+
+router.post('/flashcards/generate', async (req: Request, res: Response) => {
+  const userId = new mongoose.Types.ObjectId(req.gamer!.userId);
+  const limit = Math.min(15, Math.max(4, parseInt(String(req.body?.limit ?? '8'), 10) || 8));
+  const mistakesFromSession = Array.isArray(req.body?.mistakes)
+    ? req.body.mistakes.map((m: any) => ({
+        original: m.original ?? m.originalUtterance,
+        corrected: m.corrected ?? m.correctedForm,
+        type: m.type ?? m.errorType,
+        explanation: m.explanation ?? m.cardExplanation,
+        word: m.word ?? m.focusWord,
+      }))
+    : [];
+
+  const recentMistakes = await MistakeModel.find({ userId })
+    .sort({ createdAt: -1 })
+    .limit(10)
+    .lean();
+  const mergedMistakes = [
+    ...mistakesFromSession,
+    ...recentMistakes
+      .filter((m) => !isLowValueCard(String(m.originalUtterance), String(m.correctedForm)))
+      .map((m) => ({
+        original: m.originalUtterance,
+        corrected: m.correctedForm,
+        type: m.errorType,
+        explanation: m.cardExplanation,
+        word: m.focusWord,
+      })),
+  ];
+
+  const generated = await generateFlashcardsWithLlm({
+    userId: String(userId),
+    mistakesFromSession: mergedMistakes,
+    recentChat: Array.isArray(req.body?.recentChat) ? req.body.recentChat : [],
+    limit,
+  });
+  const createdIds = await persistFlashcards(userId, generated);
+  const created = await MistakeModel.find({ _id: { $in: createdIds } }).lean();
+  res.json({
+    createdCount: createdIds.length,
+    cards: created.map(toCard),
+    source: mergedMistakes.length > 0 ? 'user_history' : 'default_bank',
+  });
 });
 
 router.post('/flashcards/review', async (req: Request, res: Response) => {
@@ -285,19 +411,66 @@ router.post('/flashcards/review', async (req: Request, res: Response) => {
 
 router.get('/quiz/questions', async (req: Request, res: Response) => {
   const quizType = String(req.query.quizType ?? 'grammar');
-  const limit = Math.min(20, Math.max(1, parseInt(String(req.query.limit ?? '10'), 10) || 10));
-  const pool = await QuestionBankModel.find({ type: quizType }).limit(Math.max(limit * 3, limit)).lean();
-  const shuffled = [...pool].sort(() => Math.random() - 0.5).slice(0, limit);
-  const source = shuffled.length > 0 ? shuffled : FALLBACK_GRAMMAR_QUESTIONS.slice(0, limit);
-  const questions = source.map((q: any) => ({
+  const limit = Math.min(15, Math.max(10, parseInt(String(req.query.limit ?? '10'), 10) || 10));
+  const difficulty = Math.min(3, Math.max(1, parseInt(String(req.query.difficulty ?? '0'), 10) || 0));
+  const userId = new mongoose.Types.ObjectId(req.gamer!.userId);
+
+  await ensureQuestionBankSeeded();
+
+  const recentTexts = await getRecentQuizQuestionTexts(userId);
+  let pool = await QuestionBankModel.find({ type: quizType }).lean();
+  if (difficulty > 0) {
+    pool = pool.filter((q) => Number(q.difficulty) === difficulty);
+  }
+  const shuffled = [...pool]
+    .filter((q) => !recentTexts.includes(String(q.questionText)))
+    .sort(() => Math.random() - 0.5);
+
+  let selected = shuffled.slice(0, limit);
+  if (selected.length < limit) {
+    const generated = await generateQuizQuestionsWithLlm({
+      userId: String(userId),
+      limit,
+      difficulty: difficulty || 2,
+      excludeTexts: [...recentTexts, ...selected.map((q) => String(q.questionText))],
+    });
+    for (const q of generated) {
+      const exists = await QuestionBankModel.findOne({ type: quizType, questionText: q.questionText }).lean();
+      if (exists) {
+        selected.push(exists);
+        continue;
+      }
+      const saved = await QuestionBankModel.create({
+        type: quizType,
+        difficulty: q.difficulty,
+        questionText: q.questionText,
+        options: q.options,
+        correctAnswer: q.correctAnswer,
+        explanation: q.explanation,
+        errorType: (['grammar', 'vocabulary', 'tense', 'agreement', 'other'].includes(q.category)
+          ? q.category
+          : 'grammar') as 'grammar' | 'vocabulary' | 'tense' | 'agreement' | 'other',
+      });
+      selected.push(saved.toObject());
+    }
+    selected = selected
+      .filter((q, idx, arr) => arr.findIndex((x) => String(x.questionText) === String(q.questionText)) === idx)
+      .slice(0, limit);
+  }
+
+  const difficultyLabel = (d: number) => (d <= 1 ? 'beginner' : d === 2 ? 'intermediate' : 'advanced');
+  const questions = selected.map((q: any) => ({
     _id: String(q._id ?? q.id),
-    type: q.type,
-    difficulty: q.difficulty,
+    type: q.type ?? quizType,
+    difficulty: Number(q.difficulty ?? 2),
+    difficultyLabel: difficultyLabel(Number(q.difficulty ?? 2)),
+    category: String(q.errorType ?? q.category ?? 'grammar'),
+    questionType: String(q.questionType ?? 'multiple_choice'),
     questionText: q.questionText ?? q.question_text,
     options: q.options,
     explanation: q.explanation,
   }));
-  res.json({ questions });
+  res.json({ questions, count: questions.length, source: shuffled.length >= limit ? 'database' : 'hybrid' });
 });
 
 router.post('/quiz/submit', async (req: Request, res: Response) => {
@@ -355,6 +528,10 @@ router.post('/quiz/submit', async (req: Request, res: Response) => {
           correctedForm: g.correctAnswer || '(see explanation)',
           errorType: 'grammar',
           errorTag: 'quiz',
+          cardFront: `Quiz mistake: "${g.userAnswer}"`,
+          cardBack: g.correctAnswer || '(see explanation)',
+          cardExplanation: String(g.explanation ?? 'Review this grammar pattern.'),
+          cardSubtype: 'grammar_correction',
           nextReviewDate: new Date(),
           intervalDays: 1,
           easeFactor: 2.5,
@@ -438,19 +615,22 @@ router.post('/session/complete', async (req: Request, res: Response) => {
   });
 
   const mistakes = Array.isArray(body.mistakes) ? body.mistakes : [];
-  for (const m of mistakes) {
-    await MistakeModel.create({
-      userId: user._id,
-      sessionId: null,
-      originalUtterance: String(m.originalUtterance ?? ''),
-      correctedForm: String(m.correctedForm ?? ''),
-      errorType: m.errorType ?? 'grammar',
-      errorTag: String(m.errorTag ?? 'session'),
-      nextReviewDate: new Date(),
-      intervalDays: 1,
-      easeFactor: 2.5,
-      reviewCount: 0,
+  const validMistakes = mistakes.filter(
+    (m: any) => !isLowValueCard(String(m.originalUtterance ?? m.original ?? ''), String(m.correctedForm ?? m.corrected ?? ''))
+  );
+  if (validMistakes.length > 0) {
+    const generated = await generateFlashcardsWithLlm({
+      userId: String(user._id),
+      mistakesFromSession: validMistakes.map((m: any) => ({
+        original: m.originalUtterance ?? m.original,
+        corrected: m.correctedForm ?? m.corrected,
+        type: m.errorType ?? m.type,
+        explanation: m.explanation ?? m.cardExplanation,
+        word: m.focusWord ?? m.word,
+      })),
+      limit: Math.min(6, validMistakes.length + 2),
     });
+    await persistFlashcards(user._id, generated);
   }
 
   res.json({
@@ -460,6 +640,22 @@ router.post('/session/complete', async (req: Request, res: Response) => {
     streakResult: { current: user.streak.current, longest: user.streak.longest, resilienceBonusAwarded: false, sameDaySession: false },
     achievements: [],
   });
+});
+
+router.post('/admin/demo-seed', async (req: Request, res: Response) => {
+  const secret = String(process.env.DEMO_SEED_SECRET ?? 'speakwise-demo-2025').trim();
+  const provided = String(req.headers['x-demo-seed-secret'] ?? req.body?.secret ?? '').trim();
+  if (!provided || provided !== secret) {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
+  try {
+    const result = await runFullDemoSeed();
+    res.json({ ok: true, ...result });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'Demo seed failed';
+    res.status(500).json({ error: message });
+  }
 });
 
 export const gamificationMongoRouter = router;

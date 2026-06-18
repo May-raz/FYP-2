@@ -31,5 +31,11 @@ export function createApp(): express.Express {
   app.use('/api', tutorRouter);
   app.use('/api/v1/gamification', gamificationMongoRouter);
 
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('[api] unhandled error:', err);
+    if (res.headersSent) return;
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  });
+
   return app;
 }
