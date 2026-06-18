@@ -3,6 +3,11 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useNavig
 import axios from 'axios';
 import './App.css';
 import { ChatEndModal } from './components/ChatEndModal.jsx';
+import {
+  getVoiceProfile,
+  pickVoiceForProfile,
+  speakAssistantText,
+} from './services/ttsService';
 
 /** Prefer higher-quality English voices when the browser exposes them (Chrome/Edge/Safari vary). */
 function pickBestEnglishVoice() {
@@ -371,10 +376,15 @@ const DEFAULT_EMMA_CHARACTER = {
   id: 'emma',
   name: 'Emma',
   personaType: 'default',
-  description: 'Default supportive English tutor.',
+  description: 'Warm, friendly English conversation partner.',
   stylePreview: 'Friendly and balanced',
   avatar: '👩‍🏫',
   challengeMode: false,
+  ttsProfile: {
+    preferredVoiceHints: ['google', 'natural', 'neural', 'jenny', 'aria', 'samantha', 'emma'],
+    rate: 0.96,
+    pitch: 1.05,
+  },
 };
 
 const CHARACTER_LIBRARY = [
@@ -2322,6 +2332,7 @@ const ChatPage = () => {
   const [liveAnalysis, setLiveAnalysis] = useState(null);
   const [isAnalyzingLive, setIsAnalyzingLive] = useState(false);
   const [emotionState, setEmotionState] = useState(null);
+  const [turnFeedback, setTurnFeedback] = useState(null);
   const [liveWpm, setLiveWpm] = useState(0);
   const [liveWpmLabel, setLiveWpmLabel] = useState('Moderate');
   const [characterLoadingLine, setCharacterLoadingLine] = useState('Emma is typing...');
@@ -2582,12 +2593,16 @@ const ChatPage = () => {
 
   useEffect(() => {
     const refreshVoice = () => {
-      if (isHistoricalMode && selectedCharacter?.id && selectedCharacter.id !== 'emma') {
-        const v = pickCharacterVoice(selectedCharacter.id, selectedCharacter?.ttsProfile);
-        preferredVoiceRef.current = v || pickBestEnglishVoice();
-        return;
-      }
-      preferredVoiceRef.current = pickBestEnglishVoice();
+      const charId = isHistoricalMode && selectedCharacter?.id && selectedCharacter.id !== 'emma'
+        ? selectedCharacter.id
+        : 'emma';
+      const profile = getVoiceProfile(
+        charId,
+        Boolean(selectedCharacter?.challengeMode),
+        selectedCharacter?.ttsProfile
+      );
+      preferredVoiceRef.current = pickVoiceForProfile(profile);
+      preferredVoiceRef.currentProfile = profile;
     };
     refreshVoice();
     if ('speechSynthesis' in window) {
@@ -2652,70 +2667,19 @@ const ChatPage = () => {
     } catch (_) { /* ignore */ }
   };
 
-  // TTS: best available English voice, chunked, less robotic pacing.
+  // TTS: conversational reply only — swap provider in services/ttsService.js
   const speakText = useCallback((text) => {
-    if (!audioEnabled || !('speechSynthesis' in window)) return;
+    const profile = preferredVoiceRef.currentProfile || getVoiceProfile('emma');
+    speakAssistantText(text, {
+      audioEnabled,
+      voice: preferredVoiceRef.current,
+      profile,
+      generationRef: ttsGenerationRef,
+      onError: (e) => console.warn('TTS Error:', e?.error || e),
+    });
+  }, [audioEnabled]);
 
-    try {
-      window.speechSynthesis.cancel();
-      const generation = ttsGenerationRef.current + 1;
-      ttsGenerationRef.current = generation;
-
-      const chunks = splitIntoSpeechChunks(text);
-      if (!chunks.length) return;
-      ttsQueueRef.current = chunks;
-      ttsSpeakingRef.current = false;
-
-      const speakNext = () => {
-        if (!audioEnabled || ttsGenerationRef.current !== generation) return;
-        const next = ttsQueueRef.current.shift();
-        if (!next) {
-          ttsSpeakingRef.current = false;
-          return;
-        }
-        ttsSpeakingRef.current = true;
-        const utterance = new SpeechSynthesisUtterance(next);
-        const v = preferredVoiceRef.current;
-        if (v) {
-          utterance.voice = v;
-          utterance.lang = v.lang || 'en-US';
-        } else {
-          utterance.lang = 'en-US';
-        }
-        // Slightly faster than before; chunking creates natural pauses.
-        const profileRate = Number(selectedCharacter?.ttsProfile?.rate);
-        const profilePitch = Number(selectedCharacter?.ttsProfile?.pitch);
-        utterance.rate = Number.isFinite(profileRate) && profileRate > 0 ? profileRate : 0.98;
-        const basePitch = Number.isFinite(profilePitch) && profilePitch > 0 ? profilePitch : 1.02;
-        utterance.pitch = next.trim().endsWith('?') ? Math.min(1.2, basePitch + 0.04) : basePitch;
-        utterance.volume = 1.0;
-
-        utterance.onend = () => {
-          if (ttsGenerationRef.current !== generation) return;
-          // Small gap between chunks feels more human.
-          setTimeout(speakNext, 120);
-        };
-        utterance.onerror = (e) => {
-          if (ttsGenerationRef.current !== generation) return;
-          const errCode = String(e?.error || '').toLowerCase();
-          // "interrupted"/"canceled" is expected when we intentionally stop speech.
-          if (errCode === 'interrupted' || errCode === 'canceled' || errCode === 'cancelled') {
-            return;
-          }
-          console.warn('TTS Error:', e.error);
-          // Skip this chunk and continue.
-          setTimeout(speakNext, 50);
-        };
-        window.speechSynthesis.speak(utterance);
-      };
-
-      speakNext();
-    } catch (err) {
-      console.warn('TTS not available:', err);
-    }
-  }, [audioEnabled, selectedCharacter]);
-
-  const addMessage = useCallback((content, type, analysis = null, accentFeedback = null, tutorFeedback = null) => {
+  const addMessage = useCallback((content, type, analysis = null, accentFeedback = null, tutorFeedback = null, chatFeedback = null) => {
     const newMessage = {
       id: Date.now() + Math.random(),
       content,
@@ -2723,6 +2687,7 @@ const ChatPage = () => {
       analysis,
       accentFeedback,
       tutorFeedback,
+      chatFeedback,
       timestamp: new Date()
     };
 
@@ -2899,6 +2864,7 @@ const ChatPage = () => {
       const reader = streamResp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let latestFeedback = null;
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -2917,6 +2883,10 @@ const ChatPage = () => {
             }
             if (payload?.final && payload?.response) {
               botResponse = String(payload.response);
+              if (payload?.chatFeedback) {
+                latestFeedback = payload.chatFeedback;
+                setTurnFeedback(payload.chatFeedback);
+              }
               if (payload?.emotionState) {
                 setEmotionState({
                   confidence: Number(payload.emotionState.confidence ?? 0),
@@ -2943,7 +2913,7 @@ const ChatPage = () => {
         throw new Error('Empty reply');
       }
 
-      addMessage(botResponse, 'bot');
+      addMessage(botResponse, 'bot', null, null, null, latestFeedback);
       runLiveAnalysis(trimmed, botResponse).catch(() => {});
       setRetryCount(0);
 
@@ -3164,6 +3134,42 @@ const ChatPage = () => {
                 <div key={message.id} className={`message ${message.type}`}>
                   <div className="message-content">
                     <p>{message.content}</p>
+                    {message.type === 'bot' && message.chatFeedback && (
+                      <div className="message-feedback-panel">
+                        {message.chatFeedback.emotion?.detected && (
+                          <div className="feedback-chip emotion-chip">
+                            Mood: {message.chatFeedback.emotion.detected}
+                            {typeof message.chatFeedback.emotion.confidence === 'number' && (
+                              <span className="feedback-chip-meta">
+                                {' '}({Math.round(message.chatFeedback.emotion.confidence * 100)}%)
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {message.chatFeedback.conversationIntent && (
+                          <div className="feedback-chip intent-chip">
+                            Intent: {message.chatFeedback.conversationIntent.replace(/_/g, ' ')}
+                          </div>
+                        )}
+                        {(message.chatFeedback.corrections || []).map((c, idx) => (
+                          <div key={`corr-${message.id}-${idx}`} className="feedback-correction">
+                            <span className="error-label">Gentle fix</span>
+                            <p>
+                              <span className="grammar-suggestion">{c.corrected}</span>
+                              {c.explanation ? ` — ${c.explanation}` : ''}
+                            </p>
+                          </div>
+                        ))}
+                        {(message.chatFeedback.pronunciationTips || []).map((p, idx) => (
+                          <div key={`pron-${message.id}-${idx}`} className="feedback-pronunciation">
+                            <span className="practice-label">Pronunciation</span>
+                            <p>
+                              <strong>{p.word}</strong>: {p.tip}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <span className="message-time">
                     {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -3214,6 +3220,18 @@ const ChatPage = () => {
                 </p>
                 <div className="analysis-list-block">
                   <h4>Emotion Panel</h4>
+                  {turnFeedback?.emotion?.detected && (
+                    <div className="emotion-row">
+                      <span>Detected mood</span>
+                      <span className="emotion-pill neutral">{turnFeedback.emotion.detected}</span>
+                    </div>
+                  )}
+                  {turnFeedback?.conversationIntent && (
+                    <div className="emotion-row">
+                      <span>Intent</span>
+                      <span className="emotion-pill neutral">{turnFeedback.conversationIntent.replace(/_/g, ' ')}</span>
+                    </div>
+                  )}
                   {[
                     ['Confidence', emotionState?.confidence, 'good'],
                     ['Nervousness', emotionState?.nervousness, (emotionState?.nervousness ?? 0) > 60 ? 'bad' : 'neutral'],
@@ -3253,6 +3271,18 @@ const ChatPage = () => {
                 </div>
                 <div className="analysis-list-block">
                   <h4>Emotion Panel</h4>
+                  {turnFeedback?.emotion?.detected && (
+                    <div className="emotion-row">
+                      <span>Detected mood</span>
+                      <span className="emotion-pill neutral">{turnFeedback.emotion.detected}</span>
+                    </div>
+                  )}
+                  {turnFeedback?.conversationIntent && (
+                    <div className="emotion-row">
+                      <span>Intent</span>
+                      <span className="emotion-pill neutral">{turnFeedback.conversationIntent.replace(/_/g, ' ')}</span>
+                    </div>
+                  )}
                   {[
                     ['Confidence', emotionState?.confidence, 'good'],
                     ['Nervousness', emotionState?.nervousness, (emotionState?.nervousness ?? 0) > 60 ? 'bad' : 'neutral'],

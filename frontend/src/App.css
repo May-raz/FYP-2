@@ -1964,6 +1964,46 @@ button:disabled, .btn-primary:disabled, .btn-secondary:disabled {
   margin-top: var(--space-sm);
 }
 
+.message-feedback-panel {
+  margin-top: var(--space-md);
+  padding: var(--space-md);
+  background: rgba(99, 102, 241, 0.06);
+  border-radius: var(--border-radius-lg);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  text-align: left;
+}
+
+.feedback-chip {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: capitalize;
+  padding: 4px 10px;
+  border-radius: 999px;
+  margin-right: 6px;
+  margin-bottom: 6px;
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--primary-color, #6366f1);
+}
+
+.feedback-chip-meta {
+  opacity: 0.75;
+  font-weight: 500;
+  text-transform: none;
+}
+
+.feedback-correction,
+.feedback-pronunciation {
+  margin-top: var(--space-sm);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.feedback-correction p,
+.feedback-pronunciation p {
+  margin: 4px 0 0;
+}
+
 .error-label, .drill-label, .practice-label, .focus-label {
   font-size: 12px;
   font-weight: 600;

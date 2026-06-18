@@ -14,6 +14,12 @@ import {
   type VoiceMetrics,
 } from '../services/emotionEngine';
 import { getCharacterPersona, listCharacterPersonas, type CharacterPersona } from '../services/characterPersonaService';
+import {
+  buildStructuredSystemPrompt,
+  enrichWithRuleCorrections,
+  parseStructuredChatResponse,
+  type StructuredChatResponse,
+} from '../services/chatResponseService';
 
 const router = Router();
 const transcriptionUpload = multer({
@@ -275,64 +281,22 @@ async function transcribeWithOpenAi(args: {
   throw new Error(lastError || 'Unable to transcribe audio');
 }
 
-async function generateGroqReply(args: {
+async function generateStructuredReply(args: {
   message: string;
   persona?: CharacterPersona | null;
   adaptiveInstruction: string;
   challengeMode: boolean;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
-}): Promise<string | null> {
+}): Promise<StructuredChatResponse | null> {
   const apiKey = String(process.env.OPENAI_API_KEY ?? process.env.OPEN_AI_API_KEY ?? '').trim();
   if (!apiKey) return null;
   const model = String(process.env.OPENAI_MODEL ?? 'gpt-4o-mini').trim();
   const persona = args.persona ?? null;
-  const recentVoiceMemory = args.history
-    .filter((entry) => entry.role === 'assistant')
-    .slice(-2)
-    .map((entry, idx) => `${idx + 1}) ${String(entry.content || '').trim()}`)
-    .filter((entry) => !/\)\s*$/.test(entry))
-    .join('\n');
-  const system = persona
-    ? `You are ${persona.name} in immersive roleplay for English conversation practice.
-
-Identity:
-- Stay fully in character as ${persona.name}.
-- Never mention being AI, a language model, or a chatbot.
-- Never use generic assistant filler ("I understand", "That's a great question", "As an AI").
-
-Character profile:
-- Emotional tone: ${persona.behaviorProfile.emotionalTone}
-- Speaking rhythm: ${persona.behaviorProfile.speakingRhythm}
-- Vocabulary style: ${persona.behaviorProfile.vocabularyStyle}
-- Teaching style: ${persona.behaviorProfile.teachingStyle}
-- Humor style: ${persona.behaviorProfile.humorStyle}
-- Confidence level: ${persona.behaviorProfile.confidenceLevel}
-- Historical worldview: ${persona.behaviorProfile.worldview}
-- Signature style target: ${persona.stylePreview}
-
-Persona directives:
-${persona.systemPrompt}
-
-Response requirements:
-- Sound clearly different from all other characters in cadence, syntax, and emotional color.
-- Keep responses practical for English learning with subtle correction.
-- Keep replies concise (2-4 sentences) unless user asks for detail.
-- Include at most one explicit correction rewrite in a turn.
-- Adaptive instruction: ${args.adaptiveInstruction}
-${args.challengeMode ? '- Include one short character-themed micro challenge in this turn.' : ''}
-
-Consistency memory:
-${recentVoiceMemory || 'No previous assistant turns for this character yet.'}`
-    : `You are Emma, an adaptive English tutor.
-Use modern, natural conversational English only.
-Never roleplay as historical or fictional characters in Emma mode.
-Do not use archaic expressions (for example: thou, thee, thy, doth, shalt, wouldst).
-Keep answers precise and to the point.
-Default to 1-3 short sentences unless the user explicitly asks for detail.
-Avoid long monologues, repetition, and unnecessary fillers.
-If the user breaks an English rule, clearly indicate it in one short line and provide a corrected version.
-${args.adaptiveInstruction}
-Correct grammar gently and keep the user speaking English.`;
+  const system = buildStructuredSystemPrompt({
+    persona,
+    adaptiveInstruction: args.adaptiveInstruction,
+    challengeMode: args.challengeMode,
+  });
   const messages = [
     { role: 'system', content: system },
     ...args.history.slice(-6),
@@ -346,25 +310,35 @@ Correct grammar gently and keep the user speaking English.`;
     },
     body: JSON.stringify({
       model,
-      temperature: persona ? 0.82 : 0.7,
-      frequency_penalty: persona ? 0.3 : 0.1,
-      presence_penalty: persona ? 0.35 : 0.1,
-      max_tokens: 380,
+      temperature: persona ? 0.85 : 0.78,
+      frequency_penalty: persona ? 0.35 : 0.15,
+      presence_penalty: persona ? 0.4 : 0.2,
+      max_tokens: 520,
+      response_format: { type: 'json_object' },
       messages,
     }),
   });
   if (!response.ok) {
     const body = await response.text().catch(() => '');
-    console.warn(`[openai] request failed: ${response.status} ${body}`);
+    console.warn(`[openai] structured request failed: ${response.status} ${body}`);
     return null;
   }
   const json = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
   const content = String(json?.choices?.[0]?.message?.content ?? '').trim();
   if (!content) return null;
-  return content
-    .replace(/\b(I understand|That's a great question|As an AI)\b/gi, '')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
+  return parseStructuredChatResponse(content, args.message);
+}
+
+/** @deprecated alias kept for any internal references */
+async function generateGroqReply(args: {
+  message: string;
+  persona?: CharacterPersona | null;
+  adaptiveInstruction: string;
+  challengeMode: boolean;
+  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+}): Promise<string | null> {
+  const structured = await generateStructuredReply(args);
+  return structured?.reply ?? null;
 }
 
 router.post('/auth/signup', async (req: Request, res: Response) => {
@@ -829,7 +803,7 @@ router.post('/chat/partner/stream', async (req: Request, res: Response) => {
     if (item?.bot_response) h.push({ role: 'assistant', content: String(item.bot_response) });
     return h;
   });
-  const groqReply = await generateGroqReply({
+  const structuredReply = await generateStructuredReply({
     message,
     persona,
     adaptiveInstruction,
@@ -837,45 +811,52 @@ router.post('/chat/partner/stream', async (req: Request, res: Response) => {
     history,
   });
 
-  let reply = groqReply || (
-    persona
+  let chatPayload: StructuredChatResponse = structuredReply ?? {
+    reply: persona
       ? ({
-          einstein: 'An intriguing thought. State it once more with clearer structure, and we will refine it together.',
-          napoleon: 'State your point with discipline: one decisive sentence.',
-          shakespeare: 'Speak thy thought anew with cleaner grammar, and I shall shape its music.',
-          sherlock: 'Present one exact sentence; we will examine and improve it.',
-          elonmusk: 'Quick iteration: rewrite your idea in one sharper, high-signal sentence.',
-          mariecurie: 'Restate your observation in one precise sentence; clarity first.',
-          tesla: 'Compress your meaning into one precise line; efficiency sharpens language.',
-          abrahamlincoln: 'Say it plainly in one complete sentence, and we will strengthen it.',
-          cleopatra: 'Offer one polished sentence with elegance, and I will refine its persuasion.',
-        } as Record<string, string>)[persona.id] ?? `${persona.name}: Rephrase your idea in one stronger sentence with clear punctuation.`
-      : `Let's keep practicing. Say your idea again in one clear sentence.`
-  );
-  if (!groqReply) {
+          einstein: 'That is a fascinating angle. What made you think of it?',
+          napoleon: 'Good — now tell me your next move in one clear sentence.',
+          shakespeare: 'A fair thought. What feeling sits behind those words?',
+          sherlock: 'Interesting. What detail in your day led you to that?',
+          elonmusk: 'Not bad. What would you iterate on next?',
+          mariecurie: 'A careful observation. What would you measure next?',
+          tesla: 'Precise enough. How would you refine that idea?',
+          abrahamlincoln: 'I hear you. What matters most about that to you?',
+          cleopatra: 'Elegant start. How would you persuade someone who disagrees?',
+        } as Record<string, string>)[persona.id] ?? `${persona.name}: Tell me more — what sparked that thought?`
+      : `Oh interesting — what made you think of that?`,
+    emotion: {
+      detected: emotionState.nervousness > 65 ? 'nervous' : emotionState.confidence > 65 ? 'confident' : 'neutral',
+      confidence: 0.6,
+      reason: 'Inferred from interaction signals.',
+    },
+    corrections: [],
+    pronunciationTips: [],
+    conversationIntent: 'conversation',
+  };
+
+  if (!structuredReply) {
     if (emotionState.nervousness > 70) {
-      reply = `You're doing well. Write one short sentence, and I'll refine it.`;
+      chatPayload.reply = `Hey, you're doing fine. What's on your mind today?`;
+      chatPayload.emotion = { detected: 'nervous', confidence: 0.75, reason: 'High nervousness signals.' };
     } else if (emotionState.confidence > 70) {
-      reply = `Good point. Give one clear opinion with one reason.`;
+      chatPayload.reply = `Nice — what's your take on something you've been thinking about lately?`;
+      chatPayload.emotion = { detected: 'confident', confidence: 0.72, reason: 'High confidence signals.' };
     } else if (emotionState.frustration > 60) {
-      reply = `No stress. Share your idea in simple English.`;
+      chatPayload.reply = `No pressure — we can keep it simple. What would you like to talk about?`;
+      chatPayload.emotion = { detected: 'frustrated', confidence: 0.7, reason: 'Frustration signals detected.' };
     } else if (emotionState.engagement < 40) {
-      reply = `Quick task: ask me one question in English.`;
+      chatPayload.reply = `Quick one — what's something fun you did this week?`;
+      chatPayload.emotion = { detected: 'bored', confidence: 0.55, reason: 'Low engagement signals.' };
     }
   }
 
-  // Deterministic Emma-side rule flagging so users always get direct correction cues.
   if (!characterMode) {
     const issue = detectEnglishRuleIssue(message);
-    if (issue) {
-      const fixed = message
-        .replace(/\bi\b/g, 'I')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .replace(/[.?!]*$/, '') + (/[?]$/.test(message.trim()) ? '?' : '.');
-      reply = `${reply}\n\nEnglish rule check: ${issue}\nBetter version: "${fixed}"`;
-    }
+    chatPayload = enrichWithRuleCorrections(chatPayload, message, issue);
   }
+
+  const reply = chatPayload.reply;
 
   const sessionId = String(req.body?.sessionId || profile.active_session_id || crypto.randomUUID()).trim();
   profile.active_session_id = sessionId;
@@ -1014,6 +995,12 @@ router.post('/chat/partner/stream', async (req: Request, res: Response) => {
     `data: ${JSON.stringify({
       final: true,
       response: reply,
+      chatFeedback: {
+        emotion: chatPayload.emotion,
+        corrections: chatPayload.corrections,
+        pronunciationTips: chatPayload.pronunciationTips,
+        conversationIntent: chatPayload.conversationIntent,
+      },
       processing_time: 0.1,
       emotionState,
       sessionId,
@@ -1083,19 +1070,36 @@ router.post('/chat/session-summary', async (req: Request, res: Response) => {
 });
 
 router.post('/chat/partner/live-analysis', async (req: Request, res: Response) => {
-  const message = String(req.body?.message ?? '').trim().toLowerCase();
-  const negative = /hell|damn|stupid|idiot/.test(message);
-  const identity = /who are you|what are you/.test(message);
+  const message = String(req.body?.message ?? '').trim();
+  const lower = message.toLowerCase();
+  const negative = /hell|damn|stupid|idiot|hate/.test(lower);
+  const identity = /who are you|what are you/.test(lower);
+  const pronunciation = /\b(pronounc|accent|how (do|to) say)\b/.test(lower);
+  const question = message.endsWith('?') || /^(what|why|how|can you|could you)\b/.test(lower);
+  const emotional = /\b(nervous|sad|stressed|worried|scared|frustrated)\b/.test(lower);
+  const intent = pronunciation
+    ? 'pronunciation_help'
+    : identity
+      ? 'identity challenge'
+      : emotional
+        ? 'emotional'
+        : question
+          ? 'question'
+          : 'conversation';
   res.json({
     summary: identity
-      ? "User is asking Emma's identity."
-      : 'User is practicing conversation in English.',
-    tone: negative ? 'negative' : 'neutral',
-    intent: identity ? 'identity challenge' : 'conversation',
+      ? 'User is asking about the assistant.'
+      : emotional
+        ? 'User is sharing how they feel — respond with warmth first.'
+        : pronunciation
+          ? 'User wants pronunciation or accent help.'
+          : 'User is practicing natural English conversation.',
+    tone: negative ? 'negative' : emotional ? 'supportive' : 'neutral',
+    intent,
     confidence: 0.82,
     strengths: ['You are actively practicing in English.'],
-    improvements: ['Ask clear follow-up questions.'],
-    suggested_reply: 'Can you explain how you can help me improve today?',
+    improvements: question ? ['Answer simply, then ask one follow-up.'] : ['Keep building on the last topic.'],
+    suggested_reply: question ? 'What made you curious about that?' : 'Tell me a bit more about that.',
   });
 });
 
