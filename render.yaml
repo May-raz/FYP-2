@@ -1,0 +1,24 @@
+# Render Blueprint — import at https://dashboard.render.com/blueprints
+# After import, set secret env vars (MONGO_URI, JWT_SECRET_KEY, OPENAI_API_KEY) in the dashboard.
+services:
+  - type: web
+    name: fyp-api
+    runtime: node
+    plan: free
+    rootDir: gamification-server
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: MONGO_DB_NAME
+        value: english_tutor
+      - key: MONGO_URI
+        sync: false
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
