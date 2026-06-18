@@ -338,13 +338,20 @@ function buildEmotionTrend(messages) {
   }));
 }
 
+const PRODUCTION_API_BASE = 'https://gamification-server.vercel.app';
 const _rawTutorApi =
   typeof process !== 'undefined' &&
   process.env &&
   (process.env.REACT_APP_API_URL || process.env.REACT_APP_NODE_URL)
     ? String(process.env.REACT_APP_API_URL || process.env.REACT_APP_NODE_URL).trim()
     : '';
-const API_BASE = (_rawTutorApi || 'http://localhost:5001').replace(/\/$/, '');
+const _isLocalHost =
+  typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+const API_BASE = (
+  _rawTutorApi ||
+  (_isLocalHost ? 'http://localhost:5001' : PRODUCTION_API_BASE)
+).replace(/\/$/, '');
 axios.defaults.baseURL = API_BASE;
 axios.defaults.withCredentials = true;
 const _rawGamificationApi =
@@ -353,13 +360,9 @@ const _rawGamificationApi =
   (process.env.REACT_APP_NODE_URL || process.env.REACT_APP_GAMIFICATION_API_URL)
     ? String(process.env.REACT_APP_NODE_URL || process.env.REACT_APP_GAMIFICATION_API_URL).trim()
     : '';
-const _gamiHost =
-  typeof window !== 'undefined' && window.location?.hostname
-    ? window.location.hostname
-    : 'localhost';
 const GAMIFICATION_BASE = (
   _rawGamificationApi ||
-  `http://${_gamiHost}:5001`
+  (_isLocalHost ? 'http://localhost:5001' : PRODUCTION_API_BASE)
 ).replace(/\/$/, '');
 console.info('API config', { tutorBase: API_BASE, gamificationBase: GAMIFICATION_BASE });
 
