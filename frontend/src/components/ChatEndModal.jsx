@@ -31,6 +31,9 @@ export function ChatEndModal({
   onStartNewChat,
   onDownloadTranscript,
   onBackToDashboard,
+  onPracticePronunciation,
+  onReviewFlashcards,
+  onViewProgress,
 }) {
   const titleId = React.useId();
   const dominant = dominantFromTrend(emotionTrend);
@@ -79,6 +82,30 @@ export function ChatEndModal({
               <p className="max-w-prose text-[15px] leading-relaxed text-slate-600 dark:text-slate-300">
                 {summary}
               </p>
+            </section>
+
+            <section className="session-recommend-banner text-left" aria-label="Recommended next steps">
+              <p className="session-recommend-title">Great session!</p>
+              <p className="session-recommend-copy">
+                Want to improve the words you struggled with? Try Advanced Pronunciation Assessment or review flashcards.
+              </p>
+              <div className="session-recommend-actions">
+                {onPracticePronunciation && (
+                  <button type="button" className="btn-primary" onClick={onPracticePronunciation}>
+                    Practice Pronunciation
+                  </button>
+                )}
+                {onReviewFlashcards && (
+                  <button type="button" className="btn-secondary" onClick={onReviewFlashcards}>
+                    Review Flashcards
+                  </button>
+                )}
+                {onViewProgress && (
+                  <button type="button" className="btn-secondary" onClick={onViewProgress}>
+                    View Progress
+                  </button>
+                )}
+              </div>
             </section>
 
             <section aria-label="Session stats" className="text-left">

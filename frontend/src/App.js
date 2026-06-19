@@ -3,10 +3,56 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useNavig
 import axios from 'axios';
 import './App.css';
 import { ChatEndModal } from './components/ChatEndModal.jsx';
+import { AppToastHost, showAppToast } from './components/AppToast.jsx';
 import {
   speakAssistantText,
   stopAssistantSpeech as stopTts,
 } from './services/ttsService';
+
+function buildProficiencyBreakdown(proficiency = {}, stats = {}) {
+  const awaiting = proficiency.awaiting_initial_assessment === true;
+  const demo = awaiting || !(proficiency.grammar_score || proficiency.pronunciation_score);
+  const grammar = Number(proficiency.grammar_score ?? (demo ? 74 : 70));
+  const pronunciation = Number(proficiency.pronunciation_score ?? (demo ? 68 : 70));
+  const fluency = Number(proficiency.fluency_score ?? (demo ? 71 : 70));
+  const vocabulary = Number(
+    stats?.vocabulary_score ?? stats?.basic?.vocabulary_score ?? (demo ? 76 : Math.round((grammar + fluency) / 2))
+  );
+  const listening = Number(
+    stats?.listening_score ?? stats?.basic?.listening_score ?? (demo ? 70 : Math.round((pronunciation + fluency) / 2))
+  );
+  const confidence = Number(
+    stats?.confidence_score ?? stats?.basic?.confidence_score ?? (demo ? 73 : Math.round((grammar + pronunciation + fluency) / 3))
+  );
+  const tipFor = (score, low, high) => (score < 65 ? low : score < 80 ? high : `${high.split('—')[0].trim()} — keep this momentum.`);
+  return [
+    { key: 'grammar', label: 'Grammar', score: grammar, tip: tipFor(grammar, 'Review tense and article rules in flashcards.', 'Solid grammar — try harder quiz questions.') },
+    { key: 'vocabulary', label: 'Vocabulary', score: vocabulary, tip: tipFor(vocabulary, 'Learn 5 new words daily via vocabulary cards.', 'Great word range — use new words in chat.') },
+    { key: 'pronunciation', label: 'Pronunciation', score: pronunciation, tip: tipFor(pronunciation, 'Practice problem sounds with Advanced Pronunciation.', 'Clear delivery — keep recording short phrases.') },
+    { key: 'fluency', label: 'Fluency', score: fluency, tip: tipFor(fluency, 'Pause less between clauses; speak in full sentences.', 'Good flow — extend to longer topics.') },
+    { key: 'listening', label: 'Listening', score: listening, tip: tipFor(listening, 'Replay Emma replies and repeat key phrases.', 'Strong listening — try character chats.') },
+    { key: 'confidence', label: 'Confidence', score: confidence, tip: tipFor(confidence, 'Short daily sessions build speaking confidence fast.', 'Confident speaker — challenge yourself in chat.') },
+  ];
+}
+
+function buildProgressSummary(profile = {}, stats = {}, gamification = {}) {
+  const quizScore = stats?.recent_activity?.avg_grammar_score ?? profile?.recent_scores?.grammar ?? 72;
+  const pronScore = stats?.recent_activity?.avg_pronunciation_score ?? profile?.recent_scores?.pronunciation ?? 68;
+  const dueCards = gamification?.dueCards ?? 0;
+  const breakdown = buildProficiencyBreakdown(profile?.profile || profile, stats);
+  const weakest = [...breakdown].sort((a, b) => a.score - b.score)[0];
+  const nextAction = dueCards > 0
+    ? `Review ${dueCards} due flashcard${dueCards === 1 ? '' : 's'} to reinforce weak areas.`
+    : weakest?.key === 'pronunciation'
+      ? 'Run Advanced Pronunciation on 3 phrases you find difficult.'
+      : 'Take a 10-question grammar quiz to measure recent progress.';
+  return {
+    quizPerformance: `Recent grammar quiz average: ${Math.round(quizScore)}%`,
+    weakAreas: weakest ? `${weakest.label} (${weakest.score}%) — ${weakest.tip}` : 'No weak areas flagged yet.',
+    pronunciationPractice: `Last session pronunciation: ${Math.round(pronScore)}%. Practice phrases where STT missed words.`,
+    nextAction,
+  };
+}
 
 /** Light cleanup for Web Speech API output (spacing + leading fillers). */
 function looksLikeQuestion(text) {
@@ -1392,6 +1438,9 @@ const AdvancedPronunciationAssessment = ({ onClose, initialPhrase = '' }) => {
         </div>
 
         <div className="assessment-content">
+          <p className="pronunciation-disclaimer">
+            AI estimates pronunciation using speech recognition and phrase comparison — not true phoneme-level scoring.
+          </p>
           <div className="pronunciation-target-card">
             <div className="pronunciation-meta-row">
               <span className="analysis-pill">{phraseItem?.difficulty || 'intermediate'}</span>
@@ -1437,41 +1486,61 @@ const AdvancedPronunciationAssessment = ({ onClose, initialPhrase = '' }) => {
                 🔁 Practice Again
               </button>
             </div>
-            {isAssessing ? (
-              <div className="inline-loading"><div className="loading-spinner small"></div><span>Analyzing your pronunciation...</span></div>
-            ) : null}
-            {transcript ? <p className="pronunciation-transcript"><strong>You said:</strong> {transcript}</p> : null}
+            {transcript ? <p className="pronunciation-transcript"><strong>What you probably said:</strong> {transcript}</p> : null}
             {error ? <p className="pronunciation-tts-error">{error}</p> : null}
           </div>
 
+          {isAssessing ? (
+            <div className="pronunciation-analyzing-block inline-loading">
+              <div className="loading-spinner small"></div>
+              <span>Analyzing your pronunciation...</span>
+            </div>
+          ) : null}
+
           {assessment && (
             <div className="pronunciation-feedback-grid">
-              <div className="score-circle large">
-                <span className="score">{Math.round(assessment.score ?? 0)}</span>
-                <span className="label">Score</span>
-              </div>
-              <div className="pronunciation-metric-row">
-                <span>Fluency: <strong>{Math.round(assessment.fluency ?? 0)}</strong></span>
-                <span>Accuracy: <strong>{Math.round(assessment.accuracy ?? 0)}</strong></span>
+              <div className="pronunciation-result-header">
+                <div className="score-circle large">
+                  <span className="score">{Math.round(assessment.score ?? 0)}</span>
+                  <span className="label">Score</span>
+                </div>
+                <div className="pronunciation-metric-row">
+                  <span>Accuracy: <strong>{Math.round(assessment.accuracy ?? 0)}%</strong></span>
+                  <span>Fluency: <strong>{Math.round(assessment.fluency ?? 0)}%</strong></span>
+                </div>
               </div>
               <p className="encouraging-feedback">{assessment.encouragingFeedback}</p>
+              {!!assessment.missingWords?.length && (
+                <div className="analysis-section">
+                  <h4>Missing words</h4>
+                  <div className="word-tags">
+                    {assessment.missingWords.map((w) => <span key={w} className="word-tag">{w}</span>)}
+                  </div>
+                </div>
+              )}
               {!!assessment.problemWords?.length && (
                 <div className="analysis-section">
-                  <h4>Problem words</h4>
+                  <h4>Changed / problem words</h4>
                   <div className="word-tags">
                     {assessment.problemWords.map((w) => <span key={w} className="word-tag">{w}</span>)}
                   </div>
                 </div>
               )}
+              {assessment.correctedPhrase ? (
+                <div className="analysis-section">
+                  <h4>What you should practice</h4>
+                  <p>{assessment.correctedPhrase}</p>
+                </div>
+              ) : null}
               {!!assessment.tips?.length && (
                 <div className="analysis-section">
-                  <h4>Tips</h4>
+                  <h4>Tips & stress</h4>
                   <ul>{assessment.tips.map((t, i) => <li key={i}>{t}</li>)}</ul>
                 </div>
               )}
               {!!assessment.suggestedPractice?.length && (
                 <div className="analysis-section">
-                  <h4>Keep practicing</h4>
+                  <h4>Practice chunks</h4>
                   <ul>{assessment.suggestedPractice.map((p, i) => <li key={i}>{p}</li>)}</ul>
                 </div>
               )}
@@ -1767,6 +1836,14 @@ const Dashboard = () => {
   const [showDetailedAnalytics, setShowDetailedAnalytics] = useState(false);
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  useEffect(() => {
+    if (location.state?.openPronunciation) {
+      setShowAdvancedAssessment(true);
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+  }, [location.state, location.pathname, navigate]);
 
   const fetchDashboardData = useCallback(async ({ silent = false } = {}) => {
     try {
@@ -1938,17 +2015,6 @@ const Dashboard = () => {
           sets your starting scores and level when &quot;Let Emma decide&quot; is on.
         </div>
       )}
-      <div className="dashboard-progress-notice">
-        {atMaxLevel
-          ? `🏆 You are at max level (Level ${compositeLevel}).`
-          : `⭐ Level ${compositeLevel}: ${xpToNext} XP needed to reach Level ${nextLevel}. (Current XP: ${compositeXp})`}
-        <div className="xp-progress-track" aria-label="Level progress">
-          <div className="xp-progress-fill" style={{ width: `${progressPct}%` }}></div>
-        </div>
-        <div className="xp-progress-caption">
-          {atMaxLevel ? `Level ${compositeLevel} completed` : `${progressPct}% of current level • ${currentThreshold}-${nextThreshold} XP band`}
-        </div>
-      </div>
       <header className="dashboard-header">
         <div className="header-content">
           <h1>{greetingLabel}, {profile.full_name}! {levelEmojis[proficiency.current_level] || '👋'}</h1>
@@ -2223,13 +2289,26 @@ const Dashboard = () => {
 };
 
 // Session wrap-up after "End chat" (short, friendly — no grading UI)
-const SessionSummary = ({ summary, onClose, onBackToDashboard, onDownload }) => {
+const SessionSummary = ({ summary, onClose, onBackToDashboard, onDownload, navigate }) => {
   if (!summary) return null;
 
   const partner =
     typeof summary.summary === 'string' &&
     summary.summary.length > 0 &&
     Array.isArray(summary.improvements);
+
+  const handlePracticePronunciation = () => {
+    onClose?.();
+    navigate('/stats', { state: { openPronunciation: true } });
+  };
+  const handleReviewFlashcards = () => {
+    onClose?.();
+    navigate('/flashcards');
+  };
+  const handleViewProgress = () => {
+    onClose?.();
+    navigate('/profile');
+  };
 
   if (partner) {
     return (
@@ -2243,6 +2322,9 @@ const SessionSummary = ({ summary, onClose, onBackToDashboard, onDownload }) => 
         onStartNewChat={onClose}
         onDownloadTranscript={onDownload}
         onBackToDashboard={onBackToDashboard}
+        onPracticePronunciation={handlePracticePronunciation}
+        onReviewFlashcards={handleReviewFlashcards}
+        onViewProgress={handleViewProgress}
       />
     );
   }
@@ -2325,6 +2407,18 @@ const SessionSummary = ({ summary, onClose, onBackToDashboard, onDownload }) => 
         <div className="summary-text">
           <p>{summary.summary_text}</p>
         </div>
+
+        <section className="session-recommend-banner" aria-label="Recommended next steps">
+          <p className="session-recommend-title">Great session!</p>
+          <p className="session-recommend-copy">
+            Want to improve the words you struggled with? Try Advanced Pronunciation Assessment.
+          </p>
+          <div className="session-recommend-actions">
+            <button type="button" className="btn-primary" onClick={handlePracticePronunciation}>Practice Pronunciation</button>
+            <button type="button" className="btn-secondary" onClick={handleReviewFlashcards}>Review Flashcards</button>
+            <button type="button" className="btn-secondary" onClick={handleViewProgress}>View Progress</button>
+          </div>
+        </section>
 
         <div className="summary-actions">
           <button type="button" onClick={onClose} className="btn-secondary">
@@ -3015,7 +3109,7 @@ const ChatPage = () => {
 
   const handleVoiceInput = () => {
     if (!browserSupported) {
-      alert('Voice input is not supported in this browser. Please use a modern browser with microphone permissions enabled.');
+      showAppToast('Voice input is not supported in this browser. Use a modern browser with microphone access.', 'error');
       return;
     }
 
@@ -3344,6 +3438,7 @@ const ChatPage = () => {
           onClose={handleCloseSummary}
           onBackToDashboard={handleBackToDashboard}
           onDownload={handleDownloadTranscript}
+          navigate={navigate}
         />
       )}
     </div>
@@ -3416,24 +3511,32 @@ const HistoricalCharactersPage = () => {
 // Enhanced Profile Page with Manual Level Selection
 const ProfilePage = () => {
   const [profile, setProfile] = useState(null);
+  const [userStats, setUserStats] = useState(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState({});
   const [loading, setLoading] = useState(false);
   const [levelChangeLoading, setLevelChangeLoading] = useState(false);
+  const [pendingLevel, setPendingLevel] = useState(null);
+  const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
+  const [passwordSaving, setPasswordSaving] = useState(false);
   const navigate = useNavigate();
   const { updateUserLevel } = useAuth();
 
   useEffect(() => {
     const fetchProfile = async () => {
       try {
-        const response = await axios.get('/api/user/profile');
-        setProfile(response.data);
+        const [profileRes, statsRes] = await Promise.all([
+          axios.get('/api/user/profile'),
+          axios.get('/api/user/stats').catch(() => ({ data: null })),
+        ]);
+        setProfile(profileRes.data);
+        setUserStats(statsRes.data);
         setEditData({
-          fullName: response.data.full_name,
-          email: response.data.email,
-          daily_practice_time: response.data.profile?.goals?.daily_practice_time || 15,
-          weekly_vocab_target: response.data.profile?.goals?.weekly_vocab_target || 20,
-          correction_style: response.data.profile?.preferences?.correction_style || 'gentle'
+          fullName: profileRes.data.full_name,
+          email: profileRes.data.email,
+          daily_practice_time: profileRes.data.profile?.goals?.daily_practice_time || 15,
+          weekly_vocab_target: profileRes.data.profile?.goals?.weekly_vocab_target || 20,
+          correction_style: profileRes.data.profile?.preferences?.correction_style || 'gentle'
         });
       } catch (error) {
         console.error('Failed to fetch profile:', error);
@@ -3446,33 +3549,59 @@ const ProfilePage = () => {
   const handleSave = async () => {
     setLoading(true);
     try {
-      console.log('Saving profile data:', editData);
       setIsEditing(false);
+      showAppToast('Profile preferences saved locally for this demo.', 'success');
     } catch (error) {
       console.error('Failed to save profile:', error);
+      showAppToast('Could not save profile. Please try again.', 'error');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleLevelChange = async (newLevel) => {
-    if (window.confirm(`Are you sure you want to change your level to ${newLevel}? This will adjust your learning experience and disable automatic level adjustments.`)) {
-      setLevelChangeLoading(true);
-      try {
-        const result = await updateUserLevel(newLevel);
-        if (result.success) {
-          // Refresh profile data
-          const response = await axios.get('/api/user/profile');
-          setProfile(response.data);
-          alert(`Level successfully changed to ${newLevel}!`);
-        } else {
-          alert(`Failed to change level: ${result.error}`);
-        }
-      } catch (error) {
-        alert('Failed to change level. Please try again.');
-      } finally {
-        setLevelChangeLoading(false);
+  const confirmLevelChange = async () => {
+    const newLevel = pendingLevel;
+    if (!newLevel) return;
+    setLevelChangeLoading(true);
+    try {
+      const result = await updateUserLevel(newLevel);
+      if (result.success) {
+        const response = await axios.get('/api/user/profile');
+        setProfile(response.data);
+        showAppToast(`Level updated to ${newLevel}.`, 'success');
+      } else {
+        showAppToast(result.error || 'Failed to change level.', 'error');
       }
+    } catch (error) {
+      showAppToast('Failed to change level. Please try again.', 'error');
+    } finally {
+      setLevelChangeLoading(false);
+      setPendingLevel(null);
+    }
+  };
+
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+    if (passwordForm.newPassword.length < 6) {
+      showAppToast('New password must be at least 6 characters.', 'error');
+      return;
+    }
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      showAppToast('New passwords do not match.', 'error');
+      return;
+    }
+    setPasswordSaving(true);
+    try {
+      await axios.post('/api/user/change-password', {
+        currentPassword: passwordForm.currentPassword,
+        newPassword: passwordForm.newPassword,
+      });
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      showAppToast('Password updated successfully.', 'success');
+    } catch (err) {
+      showAppToast(err?.response?.data?.error || 'Could not change password.', 'error');
+    } finally {
+      setPasswordSaving(false);
     }
   };
 
@@ -3502,9 +3631,25 @@ const ProfilePage = () => {
   const levelChangeHistory = profile.level_change_history || [];
   const isAutoLevel = proficiency.preferences?.auto_level_adjustment !== false;
   const awaitingAssessmentProfile = proficiency.awaiting_initial_assessment === true;
+  const breakdown = buildProficiencyBreakdown(proficiency, userStats || {});
+  const progressSummary = buildProgressSummary(profile, userStats || {}, {});
 
   return (
     <div className="profile-page">
+      {pendingLevel && (
+        <div className="confirm-modal-overlay" role="presentation">
+          <div className="confirm-modal" role="dialog" aria-modal="true">
+            <h3>Change learning level?</h3>
+            <p>{`Switch to ${pendingLevel}? This adjusts your learning experience and disables automatic level adjustments.`}</p>
+            <div className="confirm-modal-actions">
+              <button type="button" className="btn-secondary" onClick={() => setPendingLevel(null)}>Cancel</button>
+              <button type="button" className="btn-primary" onClick={confirmLevelChange} disabled={levelChangeLoading}>
+                {levelChangeLoading ? 'Updating...' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <header className="profile-header">
         <button onClick={() => navigate('/stats')} className="back-button">
           ← Back to Stats
@@ -3557,7 +3702,7 @@ const ProfilePage = () => {
             
             <div className="info-item">
               <strong>Username:</strong>
-              <span>{profile.username}</span>
+              <span className="read-only-field" title="Username cannot be changed">{profile.username}</span>
             </div>
             
             <div className="info-item">
@@ -3598,7 +3743,7 @@ const ProfilePage = () => {
               {['beginner', 'intermediate', 'advanced', 'native'].map(level => (
                 <button
                   key={level}
-                  onClick={() => handleLevelChange(level)}
+                  onClick={() => setPendingLevel(level)}
                   disabled={levelChangeLoading || proficiency.level === level}
                   className={`level-option ${proficiency.level === level ? 'current' : ''}`}
                 >
@@ -3655,10 +3800,96 @@ const ProfilePage = () => {
           </div>
         </div>
 
-        {/* Rest of profile sections remain the same */}
         <div className="profile-section">
           <h2>📊 Enhanced Proficiency Breakdown</h2>
-          {/* ... existing proficiency section ... */}
+          {awaitingAssessmentProfile ? (
+            <p className="profile-hint">Chat once with Emma to unlock live scores. Demo values shown below.</p>
+          ) : null}
+          <div className="proficiency-breakdown-grid">
+            {breakdown.map((item) => (
+              <div className="proficiency-breakdown-card" key={item.key}>
+                <div className="proficiency-breakdown-head">
+                  <span className="proficiency-breakdown-label">{item.label}</span>
+                  <span className="proficiency-breakdown-pct">{item.score}%</span>
+                </div>
+                <div className="score-bar">
+                  <div className={`score-fill ${item.key === 'pronunciation' ? 'pronunciation' : item.key === 'grammar' ? 'grammar' : item.key === 'fluency' ? 'fluency' : 'grammar'}`}
+                    style={{ width: `${item.score}%` }} />
+                </div>
+                <p className="proficiency-breakdown-tip">{item.tip}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="profile-section">
+          <h2>📈 Detailed Progress Analysis</h2>
+          <div className="progress-analysis-grid">
+            <div className="progress-analysis-card">
+              <h4>Recent quiz performance</h4>
+              <p>{progressSummary.quizPerformance}</p>
+            </div>
+            <div className="progress-analysis-card">
+              <h4>Weak areas</h4>
+              <p>{progressSummary.weakAreas}</p>
+            </div>
+            <div className="progress-analysis-card">
+              <h4>Pronunciation practice</h4>
+              <p>{progressSummary.pronunciationPractice}</p>
+            </div>
+            <div className="progress-analysis-card highlight">
+              <h4>Recommended next action</h4>
+              <p>{progressSummary.nextAction}</p>
+            </div>
+          </div>
+          {recentScores && Object.keys(recentScores).length > 0 && (
+            <div className="recent-scores-row">
+              {Object.entries(recentScores).slice(0, 4).map(([key, val]) => (
+                <span key={key} className="analysis-pill">{`${key}: ${val}%`}</span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="profile-section">
+          <h2>🔒 Change Password</h2>
+          <form className="password-change-form" onSubmit={handleChangePassword}>
+            <label>
+              Current password
+              <input
+                type="password"
+                value={passwordForm.currentPassword}
+                onChange={(e) => setPasswordForm((p) => ({ ...p, currentPassword: e.target.value }))}
+                required
+                autoComplete="current-password"
+              />
+            </label>
+            <label>
+              New password
+              <input
+                type="password"
+                value={passwordForm.newPassword}
+                onChange={(e) => setPasswordForm((p) => ({ ...p, newPassword: e.target.value }))}
+                required
+                minLength={6}
+                autoComplete="new-password"
+              />
+            </label>
+            <label>
+              Confirm new password
+              <input
+                type="password"
+                value={passwordForm.confirmPassword}
+                onChange={(e) => setPasswordForm((p) => ({ ...p, confirmPassword: e.target.value }))}
+                required
+                minLength={6}
+                autoComplete="new-password"
+              />
+            </label>
+            <button type="submit" className="btn-primary" disabled={passwordSaving}>
+              {passwordSaving ? 'Updating...' : 'Update Password'}
+            </button>
+          </form>
         </div>
       </div>
     </div>
@@ -3703,6 +3934,8 @@ const LeaderboardPage = () => {
   );
 };
 
+const FLASHCARD_CACHE_KEY = 'sw-flashcards-cache-v1';
+
 const FlashcardsPage = () => {
   const [cards, setCards] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3733,8 +3966,8 @@ const FlashcardsPage = () => {
     });
   }, [speakLoading]);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  const refresh = useCallback(async ({ background = false } = {}) => {
+    if (!background) setLoading(true);
     try {
       const res = await axios.get(`${GAMIFICATION_BASE}/api/v1/gamification/flashcards/due/me?limit=20`, {
         headers: authHeaders(),
@@ -3744,8 +3977,11 @@ const FlashcardsPage = () => {
       setCards(incomingCards);
       setActiveIndex(0);
       setRevealAnswer(false);
+      try {
+        sessionStorage.setItem(FLASHCARD_CACHE_KEY, JSON.stringify(incomingCards));
+      } catch (_) { /* ignore */ }
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   }, []);
 
@@ -3759,13 +3995,25 @@ const FlashcardsPage = () => {
       );
       await refresh();
     } catch (err) {
-      alert(err?.response?.data?.error || 'Could not reset flashcards right now.');
+      showAppToast(err?.response?.data?.error || 'Could not reset flashcards right now.', 'error');
     } finally {
       setGenerating(false);
     }
   }, [refresh]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    try {
+      const cached = sessionStorage.getItem(FLASHCARD_CACHE_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length) {
+          setCards(parsed);
+          setLoading(false);
+        }
+      }
+    } catch (_) { /* ignore */ }
+    refresh({ background: !!sessionStorage.getItem(FLASHCARD_CACHE_KEY) });
+  }, [refresh]);
 
   const advanceAfterReview = useCallback((removedId) => {
     setCards((prev) => {
@@ -3794,7 +4042,7 @@ const FlashcardsPage = () => {
       );
       advanceAfterReview(mistakeId);
     } catch (err) {
-      alert('Could not save your review. Please try again.');
+      showAppToast('Could not save your review. Please try again.', 'error');
     } finally {
       setReviewSaving(false);
     }
@@ -3805,10 +4053,11 @@ const FlashcardsPage = () => {
     return String(subtype).replace(/_/g, ' ');
   };
 
-  const speakTarget = activeCard
-    ? (activeCard.cardType === 'pronunciation_review' || activeCard.cardSubtype === 'pronunciation'
-        ? (activeCard.focusWord || activeCard.cardBack || activeCard.correctedForm)
-        : (activeCard.focusWord || activeCard.correctedForm || activeCard.cardBack))
+  const isPronunciationCard = activeCard
+    && (activeCard.cardType === 'pronunciation_review' || activeCard.cardSubtype === 'pronunciation');
+
+  const speakTarget = isPronunciationCard && activeCard
+    ? (activeCard.focusWord || activeCard.cardBack || activeCard.correctedForm)
     : '';
 
   return (
@@ -3844,30 +4093,30 @@ const FlashcardsPage = () => {
               </div>
             </div>
 
-            <article className={`fc-card ${revealAnswer ? 'is-revealed' : ''}`}>
-              <div className="fc-card-top">
-                <span className="fc-type-badge">{cardTypeLabel(activeCard)}</span>
-                {activeCard.focusWord ? <span className="fc-focus-badge">{`Focus: ${activeCard.focusWord}`}</span> : null}
-              </div>
+            <article className={`fc-card fc-flip-card ${revealAnswer ? 'is-flipped is-revealed' : ''}`}>
+              <div className="fc-card-inner">
+                <div className="fc-card-face fc-card-front-face">
+                  <div className="fc-card-top">
+                    <span className="fc-type-badge">{cardTypeLabel(activeCard)}</span>
+                    {activeCard.focusWord ? <span className="fc-focus-badge">{`Focus: ${activeCard.focusWord}`}</span> : null}
+                  </div>
+                  <h3 className="fc-prompt-label">Question</h3>
+                  <p className="fc-card-front">{activeCard.cardFront || activeCard.whatIncorrect}</p>
+                  {!!activeCard.cardOptions?.length && (
+                    <ul className="fc-option-list">
+                      {activeCard.cardOptions.map((opt) => <li key={opt}>{opt}</li>)}
+                    </ul>
+                  )}
+                </div>
 
-              <h3 className="fc-prompt-label">Practice prompt</h3>
-              <p className="fc-card-front">{activeCard.cardFront || activeCard.whatIncorrect}</p>
-
-              {!!activeCard.cardOptions?.length && !revealAnswer && (
-                <ul className="fc-option-list">
-                  {activeCard.cardOptions.map((opt) => <li key={opt}>{opt}</li>)}
-                </ul>
-              )}
-
-              {revealAnswer && (
-                <div className="fc-answer-block">
+                <div className="fc-card-face fc-card-back-face">
                   <h3 className="fc-prompt-label">Answer</h3>
                   <p className="fc-card-back">{activeCard.cardBack || activeCard.improvedPhrasing || activeCard.correctedForm}</p>
                   {activeCard.cardExplanation ? (
-                    <p className="fc-explanation"><strong>Why:</strong> {activeCard.cardExplanation}</p>
+                    <p className="fc-explanation"><strong>Explanation:</strong> {activeCard.cardExplanation}</p>
                   ) : null}
                 </div>
-              )}
+              </div>
 
               <div className="fc-action-row">
                 <button
@@ -3876,25 +4125,27 @@ const FlashcardsPage = () => {
                   disabled={reviewSaving}
                   onClick={() => setRevealAnswer((v) => !v)}
                 >
-                  {revealAnswer ? 'Hide Answer' : 'Show Answer'}
+                  {revealAnswer ? 'Show Question' : 'Flip Card'}
                 </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={!speakTarget || speakLoading || reviewSaving}
-                  onClick={() => speakText(speakTarget)}
-                >
-                  {speakLoading ? 'Playing...' : '🔊 Hear Word'}
-                </button>
-                {(activeCard.cardType === 'pronunciation_review' || activeCard.cardSubtype === 'pronunciation') && (
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    disabled={reviewSaving}
-                    onClick={() => setPracticePhrase(activeCard.focusWord || activeCard.originalUtterance || activeCard.cardFront)}
-                  >
-                    🎤 Practice Speaking
-                  </button>
+                {isPronunciationCard && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={!speakTarget || speakLoading || reviewSaving}
+                      onClick={() => speakText(speakTarget)}
+                    >
+                      {speakLoading ? 'Playing...' : '🔊 Hear Word'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={reviewSaving}
+                      onClick={() => setPracticePhrase(activeCard.focusWord || activeCard.originalUtterance || activeCard.cardFront)}
+                    >
+                      🎤 Practice Pronunciation
+                    </button>
+                  </>
                 )}
               </div>
 
@@ -3941,8 +4192,10 @@ const QuizPage = () => {
   const [difficulty, setDifficulty] = useState(0);
   const navigate = useNavigate();
 
-  const loadQuestions = useCallback(async () => {
-    setLoading(true);
+  const quizCacheKey = `sw-quiz-cache-${difficulty}`;
+
+  const loadQuestions = useCallback(async ({ background = false } = {}) => {
+    if (!background) setLoading(true);
     setResult(null);
     setAnswers({});
     try {
@@ -3951,15 +4204,31 @@ const QuizPage = () => {
         `${GAMIFICATION_BASE}/api/v1/gamification/quiz/questions?quizType=grammar&limit=10${difficultyQuery}`,
         { headers: authHeaders(), timeout: 12000 }
       );
-      setQuestions(res.data?.questions || []);
+      const nextQuestions = res.data?.questions || [];
+      setQuestions(nextQuestions);
+      try {
+        sessionStorage.setItem(quizCacheKey, JSON.stringify(nextQuestions));
+      } catch (_) { /* ignore */ }
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
-  }, [difficulty]);
+  }, [difficulty, quizCacheKey]);
 
   useEffect(() => {
-    loadQuestions();
-  }, [loadQuestions]);
+    let hasCache = false;
+    try {
+      const cached = sessionStorage.getItem(quizCacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length) {
+          setQuestions(parsed);
+          setLoading(false);
+          hasCache = true;
+        }
+      }
+    } catch (_) { /* ignore */ }
+    loadQuestions({ background: hasCache });
+  }, [loadQuestions, quizCacheKey]);
 
   const submit = async () => {
     const normalizedAnswers = questions
@@ -3970,7 +4239,7 @@ const QuizPage = () => {
       .filter((x) => x && x.userAnswer);
 
     if (normalizedAnswers.length === 0) {
-      alert('Please answer at least one question before submitting.');
+      showAppToast('Please answer at least one question before submitting.', 'warning');
       return;
     }
 
@@ -3986,7 +4255,7 @@ const QuizPage = () => {
     } catch (err) {
       const msg = err?.response?.data?.error || err?.message || 'Quiz submission failed';
       console.error('Quiz submit failed:', err?.response?.data || err);
-      alert(msg);
+      showAppToast(msg, 'error');
     }
   };
 
@@ -4084,6 +4353,7 @@ const App = () => {
       <Router future={routerFutureFlags}>
         <AuthProvider>
           <div className="App">
+            <AppToastHost />
             <ThemeToggleFab />
             <Routes>
               <Route path="/" element={<Navigate to="/stats" replace />} />

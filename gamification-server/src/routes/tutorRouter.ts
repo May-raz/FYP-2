@@ -538,6 +538,34 @@ router.get('/speech/voices', async (_req: Request, res: Response) => {
   });
 });
 
+router.post('/user/change-password', async (req: Request, res: Response) => {
+  try {
+    const username = (req as Request & { tutorUser?: string }).tutorUser!;
+    const currentPassword = String(req.body?.currentPassword ?? '');
+    const newPassword = String(req.body?.newPassword ?? '');
+    if (!currentPassword || !newPassword) {
+      res.status(400).json({ error: 'Current and new password are required' });
+      return;
+    }
+    if (newPassword.length < 6) {
+      res.status(400).json({ error: 'New password must be at least 6 characters' });
+      return;
+    }
+    const user = await TutorAuthUserModel.findOne({ username });
+    if (!user || !verifyPassword(currentPassword, user.passwordHash)) {
+      res.status(401).json({ error: 'Current password is incorrect' });
+      return;
+    }
+    user.passwordHash = hashPassword(newPassword);
+    user.updatedAt = new Date().toISOString();
+    await user.save();
+    res.json({ message: 'Password updated successfully' });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'Could not change password';
+    res.status(500).json({ error: message });
+  }
+});
+
 router.get('/user/profile', async (req: Request, res: Response) => {
   const username = (req as Request & { tutorUser?: string }).tutorUser!;
   const profile = await loadProfile(username);
