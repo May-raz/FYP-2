@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { MistakeModel } from '../models/Mistake';
 import { QuestionBankModel } from '../models/QuestionBank';
 import { QuizResultModel } from '../models/QuizResult';
+import { getStudyDeck, STUDY_DECK_SIZE } from './studyDeckService';
 
 export interface GeneratedFlashcard {
   cardSubtype:
@@ -399,8 +400,11 @@ const OPENAI_FALLBACK_FLASHCARDS: GeneratedFlashcard[] = [
 
 export const DEMO_FLASHCARD_DECK = OPENAI_FALLBACK_FLASHCARDS;
 
-export function getShuffledDemoDeck(limit = 20): GeneratedFlashcard[] {
-  return [...DEMO_FLASHCARD_DECK].sort(() => Math.random() - 0.5).slice(0, limit);
+export { STUDY_DECK, STUDY_DECK_SIZE, getStudyDeck, isStudyDeckCard, studyCategoryLabel } from './studyDeckService';
+
+export function getShuffledDemoDeck(limit = STUDY_DECK_SIZE): GeneratedFlashcard[] {
+  const deck = getStudyDeck();
+  return deck.slice(0, Math.min(limit, deck.length));
 }
 
 export const EXPANDED_GRAMMAR_QUESTIONS: GeneratedQuizQuestion[] = [
@@ -579,7 +583,15 @@ export async function persistFlashcards(userId: mongoose.Types.ObjectId, cards: 
   return ids;
 }
 
+let questionBankSeeded = false;
+
 export async function ensureQuestionBankSeeded(): Promise<void> {
+  if (questionBankSeeded) return;
+  const existing = await QuestionBankModel.countDocuments({ type: 'grammar' });
+  if (existing >= 15) {
+    questionBankSeeded = true;
+    return;
+  }
   for (const q of DEMO_GRAMMAR_QUESTIONS) {
     const exists = await QuestionBankModel.findOne({
       type: 'grammar',
@@ -598,6 +610,7 @@ export async function ensureQuestionBankSeeded(): Promise<void> {
         : 'grammar') as 'grammar' | 'vocabulary' | 'tense' | 'agreement' | 'other',
     });
   }
+  questionBankSeeded = true;
 }
 
 export async function generateQuizQuestionsWithLlm(args: {

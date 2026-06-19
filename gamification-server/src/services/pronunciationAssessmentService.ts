@@ -1,13 +1,19 @@
 export interface PronunciationAssessment {
   score: number;
+  overallScore?: number;
   fluency: number;
   accuracy: number;
+  completeness?: number;
   problemWords: string[];
   missingWords: string[];
+  changedWords?: string[];
+  likelyIssue?: string;
   suggestedPractice: string[];
+  practiceChunks?: string[];
   tips: string[];
   correctedPhrase: string;
   encouragingFeedback: string;
+  nextPhraseRecommendation?: string;
 }
 
 export interface PracticePhraseItem {
@@ -98,10 +104,24 @@ function findProblemWords(target: string, transcript: string): { problemWords: s
   return { problemWords: [...new Set(problemWords)], missingWords: [...new Set(missingWords)] };
 }
 
+function findChangedWords(target: string, transcript: string): string[] {
+  const t = tokenize(target);
+  const r = tokenize(transcript);
+  const changed: string[] = [];
+  for (let i = 0; i < t.length; i += 1) {
+    const expected = t[i];
+    const got = r[i];
+    if (got && got !== expected) changed.push(expected);
+  }
+  return [...new Set(changed)];
+}
+
 async function llmPronunciationTips(args: {
   target: string;
   transcript: string;
   problemWords: string[];
+  missingWords: string[];
+  changedWords: string[];
 }): Promise<Partial<PronunciationAssessment> | null> {
   const apiKey = String(process.env.OPENAI_API_KEY ?? process.env.OPEN_AI_API_KEY ?? '').trim();
   if (!apiKey) return null;
@@ -117,9 +137,22 @@ async function llmPronunciationTips(args: {
         messages: [
           {
             role: 'system',
-            content: `Return JSON pronunciation feedback for an English learner:
-{ score, fluency, accuracy, problemWords, missingWords, suggestedPractice, tips, correctedPhrase, encouragingFeedback }
-Scores are 0-100. Keep tips short and practical.`,
+            content: `Return JSON pronunciation coaching for an English learner. Do NOT claim phoneme-level scoring.
+{
+  "overallScore": 0-100,
+  "accuracy": 0-100,
+  "fluency": 0-100,
+  "completeness": 0-100,
+  "problemWords": [],
+  "missingWords": [],
+  "changedWords": [],
+  "likelyIssue": "short summary",
+  "practiceChunks": ["repeat this chunk"],
+  "tips": ["stress this word", "slow down here"],
+  "encouragingFeedback": "",
+  "nextPhraseRecommendation": ""
+}
+Use speech recognition comparison honestly. Give short actionable coaching.`,
           },
           { role: 'user', content: JSON.stringify(args) },
         ],
@@ -158,24 +191,39 @@ export async function assessPronunciation(target: string, transcript: string): P
   const phraseMeta = findPracticePhraseByText(cleanTarget);
   const accuracy = similarityScore(cleanTarget, cleanTranscript);
   const { problemWords, missingWords } = findProblemWords(cleanTarget, cleanTranscript);
+  const changedWords = findChangedWords(cleanTarget, cleanTranscript);
+  const targetCount = tokenize(cleanTarget).length || 1;
+  const spokenCount = tokenize(cleanTranscript).length;
+  const completeness = Math.round(Math.max(0, Math.min(100, (100 * spokenCount) / targetCount - missingWords.length * 12)));
   const fluency = Math.max(0, Math.min(100, accuracy - missingWords.length * 8 + (cleanTranscript.split(/\s+/).length >= 3 ? 5 : 0)));
-  const score = Math.round(accuracy * 0.65 + fluency * 0.35);
+  const score = Math.round(accuracy * 0.5 + fluency * 0.3 + completeness * 0.2);
 
   const heuristic: PronunciationAssessment = {
     score,
+    overallScore: score,
     fluency,
     accuracy,
+    completeness,
     problemWords,
     missingWords,
+    changedWords,
+    likelyIssue: missingWords.length
+      ? 'Some target words were not detected in your speech.'
+      : changedWords.length
+        ? 'A few words sounded different from the target phrase.'
+        : 'Overall clarity is good — focus on smooth pacing.',
     suggestedPractice: [
       ...problemWords.slice(0, 3).map((w) => `${w}, ${w}, ${w}`),
       cleanTarget,
     ].filter(Boolean),
+    practiceChunks: changedWords.length
+      ? changedWords.slice(0, 3).map((w) => `Slowly repeat: "${w}"`)
+      : [cleanTarget],
     tips: phraseMeta
       ? [phraseMeta.tip, `Breakdown: ${phraseMeta.breakdown}`]
       : problemWords.length
-        ? problemWords.map((w) => `Focus on "${w}" — say it slowly, then in the full sentence.`)
-        : ['Good clarity. Try speaking a little more smoothly without long pauses.'],
+        ? problemWords.map((w) => `Stress "${w}" — say it slowly, then in the full sentence.`)
+        : ['Connect words smoothly without long pauses between them.'],
     correctedPhrase: cleanTarget,
     encouragingFeedback:
       score >= 80
@@ -183,20 +231,38 @@ export async function assessPronunciation(target: string, transcript: string): P
         : score >= 60
           ? 'Good effort. A few words need polish, but you are understandable.'
           : 'Keep practicing — focus on one problem word at a time.',
+    nextPhraseRecommendation: phraseMeta?.text ?? cleanTarget,
   };
 
-  const llm = await llmPronunciationTips({ target: cleanTarget, transcript: cleanTranscript, problemWords });
+  const llm = await llmPronunciationTips({
+    target: cleanTarget,
+    transcript: cleanTranscript,
+    problemWords,
+    missingWords,
+    changedWords,
+  });
   if (!llm) return heuristic;
 
+  const overall = Number(llm.overallScore ?? llm.score ?? heuristic.score);
   return {
-    score: Number(llm.score ?? heuristic.score),
+    score: overall,
+    overallScore: overall,
     fluency: Number(llm.fluency ?? heuristic.fluency),
     accuracy: Number(llm.accuracy ?? heuristic.accuracy),
+    completeness: Number(llm.completeness ?? heuristic.completeness),
     problemWords: Array.isArray(llm.problemWords) ? llm.problemWords.map(String) : heuristic.problemWords,
     missingWords: Array.isArray(llm.missingWords) ? llm.missingWords.map(String) : heuristic.missingWords,
-    suggestedPractice: Array.isArray(llm.suggestedPractice) ? llm.suggestedPractice.map(String) : heuristic.suggestedPractice,
+    changedWords: Array.isArray(llm.changedWords) ? llm.changedWords.map(String) : heuristic.changedWords,
+    likelyIssue: String(llm.likelyIssue ?? heuristic.likelyIssue),
+    suggestedPractice: Array.isArray(llm.practiceChunks)
+      ? llm.practiceChunks.map(String)
+      : Array.isArray(llm.suggestedPractice)
+        ? llm.suggestedPractice.map(String)
+        : heuristic.suggestedPractice,
+    practiceChunks: Array.isArray(llm.practiceChunks) ? llm.practiceChunks.map(String) : heuristic.practiceChunks,
     tips: Array.isArray(llm.tips) ? llm.tips.map(String) : heuristic.tips,
     correctedPhrase: String(llm.correctedPhrase ?? heuristic.correctedPhrase),
     encouragingFeedback: String(llm.encouragingFeedback ?? heuristic.encouragingFeedback),
+    nextPhraseRecommendation: String(llm.nextPhraseRecommendation ?? heuristic.nextPhraseRecommendation),
   };
 }

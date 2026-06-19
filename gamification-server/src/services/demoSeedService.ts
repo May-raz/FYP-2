@@ -4,12 +4,12 @@ import { MistakeModel } from '../models/Mistake';
 import { QuestionBankModel } from '../models/QuestionBank';
 import { UserModel } from '../models/User';
 import {
-  DEMO_FLASHCARD_DECK,
   DEMO_GRAMMAR_QUESTIONS,
   ensureQuestionBankSeeded,
   isLowValueCard,
   persistFlashcards,
 } from './learningContentService';
+import { getStudyDeck, STUDY_DECK_SIZE } from './studyDeckService';
 
 export function isJunkMistake(m: {
   originalUtterance?: string;
@@ -58,16 +58,15 @@ export async function seedQuestionBankFull(): Promise<number> {
   return added;
 }
 
-export async function seedFlashcardsForUser(userId: mongoose.Types.ObjectId, target = 25): Promise<number> {
-  const meaningful = await MistakeModel.countDocuments({
+export async function seedFlashcardsForUser(userId: mongoose.Types.ObjectId, target = STUDY_DECK_SIZE): Promise<number> {
+  const studyCount = await MistakeModel.countDocuments({
     userId,
-    cardFront: { $ne: '' },
+    errorTag: { $regex: /^study_/ },
   });
-  const dueCount = await MistakeModel.countDocuments({ userId });
-  if (dueCount >= target && meaningful >= Math.min(15, target)) return 0;
+  if (studyCount >= target) return 0;
 
-  const deck = [...DEMO_FLASHCARD_DECK].sort(() => Math.random() - 0.5).slice(0, target);
-  const ids = await persistFlashcards(userId, deck);
+  await MistakeModel.deleteMany({ userId, errorTag: { $not: { $regex: /^study_/ } } });
+  const ids = await persistFlashcards(userId, getStudyDeck());
   return ids.length;
 }
 

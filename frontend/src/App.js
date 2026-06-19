@@ -9,6 +9,14 @@ import {
   stopAssistantSpeech as stopTts,
 } from './services/ttsService';
 
+const capitalizeWord = (value) => {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  return s.charAt(0).toUpperCase() + s.slice(1);
+};
+
+const formatIntentLabel = (intent) => capitalizeWord(String(intent || 'conversation').replace(/_/g, ' '));
+
 function buildProficiencyBreakdown(proficiency = {}, stats = {}) {
   const awaiting = proficiency.awaiting_initial_assessment === true;
   const demo = awaiting || !(proficiency.grammar_score || proficiency.pronunciation_score);
@@ -901,7 +909,7 @@ const ProtectedRoute = ({ children }) => {
   return user ? children : <Navigate to="/login" />;
 };
 
-// Enhanced Landing Page
+// Landing Page
 const LandingPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -912,14 +920,14 @@ const LandingPage = () => {
   }
 
   return (
-    <div className="landing-page">
+    <div className="landing-page page-enter">
       <div className="ambient-orb ambient-orb-a" aria-hidden="true"></div>
       <div className="ambient-orb ambient-orb-b" aria-hidden="true"></div>
       <div className="ambient-grid" aria-hidden="true"></div>
       <header className="landing-header">
         <nav className="navbar">
           <div className="nav-brand">
-            <h2>🎓 AI English Tutor v3.1</h2>
+            <h2>SpeakWise</h2>
           </div>
           <div className="nav-links">
             <button onClick={() => navigate('/login')} className="btn-secondary">
@@ -935,21 +943,22 @@ const LandingPage = () => {
       <main className="landing-main">
         <section className="hero">
           <div className="hero-content">
-            <h1>Build Real English Confidence, One Conversation at a Time</h1>
+            <p className="section-label">English speaking practice</p>
+            <h1>Build real confidence, one conversation at a time</h1>
             <p className="hero-subtitle">
-              A speaking-first learning experience with adaptive coaching, real-time feedback, and immersive conversation modes.
+              A speaking-first learning experience with adaptive coaching, voice feedback, and focused study tools.
               Designed to feel personal, not robotic.
             </p>
             <div className="hero-features">
-              <div className="feature-badge">Pronunciation Scoring</div>
-              <div className="feature-badge">Grammar Analysis</div>
-              <div className="feature-badge">⚡ Advanced Fluency Metrics</div>
-              <div className="feature-badge">🎭 Manual Level Selection</div>
-              <div className="feature-badge">🔧 Drill-Based Correction</div>
+              <div className="feature-badge">Pronunciation Practice</div>
+              <div className="feature-badge">Grammar feedback</div>
+              <div className="feature-badge">Fluency metrics</div>
+              <div className="feature-badge">Character sessions</div>
+              <div className="feature-badge">Flashcards & quiz</div>
             </div>
             <div className="hero-buttons">
               <button onClick={() => navigate('/signup')} className="btn-primary btn-large">
-                Start Speaking Better Today
+                Start session
               </button>
             </div>
           </div>
@@ -990,27 +999,23 @@ const LandingPage = () => {
 
         <section className="features">
           <div className="container">
-            <h2>AI-Powered Features</h2>
+            <h2>What you can practice</h2>
             <div className="features-grid">
-              <div className="feature-card">
-                <div className="feature-icon">📊</div>
-                <h3>Pronunciation Scoring</h3>
-                <p>Analysis with difficulty-adjusted scoring and specific mispronunciation detection.</p>
+              <div className="feature-card sw-card">
+                <h3>Pronunciation Practice</h3>
+                <p>Record phrases and get AI coaching based on speech recognition and phrase comparison.</p>
               </div>
-              <div className="feature-card">
-                <div className="feature-icon">🎯</div>
-                <h3>Grammar & Fluency Analysis</h3>
-                <p>Comprehensive error categorization with pause analysis and filler word detection.</p>
+              <div className="feature-card sw-card">
+                <h3>Grammar & fluency</h3>
+                <p>Corrections, pause patterns, and filler-word awareness while you chat naturally.</p>
               </div>
-              <div className="feature-card">
-                <div className="feature-icon">🎭</div>
-                <h3>Manual Level Selection</h3>
-                <p>Choose your starting level or let Emma adapt automatically based on your performance.</p>
+              <div className="feature-card sw-card">
+                <h3>Your level</h3>
+                <p>Set your starting level or let Emma adapt based on your performance over time.</p>
               </div>
-              <div className="feature-card">
-                <div className="feature-icon">🔧</div>
-                <h3>Drill-Based Accent Correction</h3>
-                <p>Structured exercises with "You said... Here's how to fix it... Practice these" methodology.</p>
+              <div className="feature-card sw-card">
+                <h3>Study tools</h3>
+                <p>Flashcards and quizzes reinforce mistakes from chat without interrupting conversation flow.</p>
               </div>
             </div>
           </div>
@@ -1019,7 +1024,7 @@ const LandingPage = () => {
 
       <footer className="landing-footer">
         <div className="container">
-          <p>&copy; 2025 AI English Tutor v3.1. Language learning technology.</p>
+          <p>&copy; 2025 SpeakWise. Language learning technology.</p>
         </div>
       </footer>
     </div>
@@ -1074,7 +1079,7 @@ const SignupPage = () => {
 
   return (
     <div className="auth-page">
-      <div className="auth-container">
+      <div className="auth-container page-enter">
         <div className="auth-header">
           <h1>Start Your Learning Journey</h1>
           <p>Join the next generation of English learning with AI-powered analysis</p>
@@ -1220,7 +1225,7 @@ const LoginPage = () => {
 
   return (
     <div className="auth-page">
-      <div className="auth-container">
+      <div className="auth-container page-enter">
         <div className="auth-header">
           <h1>Welcome Back!</h1>
           <p>Continue your enhanced English learning journey</p>
@@ -1430,7 +1435,7 @@ const AdvancedPronunciationAssessment = ({ onClose, initialPhrase = '' }) => {
 
   if (initialLoading) {
     return (
-      <div className="assessment-modal">
+      <div className="assessment-modal modal-enter">
         <div className="modal-content pronunciation-practice-modal">
           <div className="loading-container">
             <div className="loading-spinner"></div>
@@ -1442,7 +1447,7 @@ const AdvancedPronunciationAssessment = ({ onClose, initialPhrase = '' }) => {
   }
 
   return (
-    <div className="assessment-modal">
+    <div className="assessment-modal modal-enter">
       <div className="modal-content advanced-assessment pronunciation-practice pronunciation-practice-modal">
         <div className="modal-header">
           <h2>Pronunciation Practice</h2>
@@ -1510,17 +1515,23 @@ const AdvancedPronunciationAssessment = ({ onClose, initialPhrase = '' }) => {
           ) : null}
 
           {assessment && (
-            <div className="pronunciation-feedback-grid">
+            <div className="pronunciation-feedback-grid score-reveal">
               <div className="pronunciation-score-row">
                 <div className="pronunciation-score-circle score-circle large">
-                  <span className="score">{Math.round(assessment.score ?? 0)}</span>
+                  <span className="score">{Math.round(assessment.overallScore ?? assessment.score ?? 0)}</span>
                   <span className="label">Score</span>
                 </div>
                 <div className="pronunciation-feedback-text">
                   <div className="pronunciation-metric-row">
                     <span>Accuracy: <strong>{Math.round(assessment.accuracy ?? 0)}%</strong></span>
                     <span>Fluency: <strong>{Math.round(assessment.fluency ?? 0)}%</strong></span>
+                    {typeof assessment.completeness === 'number' ? (
+                      <span>Completeness: <strong>{Math.round(assessment.completeness)}%</strong></span>
+                    ) : null}
                   </div>
+                  {assessment.likelyIssue ? (
+                    <p className="pronunciation-likely-issue">{assessment.likelyIssue}</p>
+                  ) : null}
                   <p className="encouraging-feedback">{assessment.encouragingFeedback}</p>
                 </div>
               </div>
@@ -1532,32 +1543,42 @@ const AdvancedPronunciationAssessment = ({ onClose, initialPhrase = '' }) => {
                   </div>
                 </div>
               )}
-              {!!assessment.problemWords?.length && (
+              {!!(assessment.changedWords?.length || assessment.problemWords?.length) && (
                 <div className="analysis-section">
                   <h4>Changed / problem words</h4>
                   <div className="word-tags">
-                    {assessment.problemWords.map((w) => <span key={w} className="word-tag">{w}</span>)}
+                    {(assessment.changedWords?.length ? assessment.changedWords : assessment.problemWords).map((w) => (
+                      <span key={w} className="word-tag">{w}</span>
+                    ))}
                   </div>
                 </div>
               )}
               {assessment.correctedPhrase ? (
                 <div className="analysis-section">
-                  <h4>What you should practice</h4>
+                  <h4>Target phrase</h4>
                   <p>{assessment.correctedPhrase}</p>
                 </div>
               ) : null}
               {!!assessment.tips?.length && (
                 <div className="analysis-section">
-                  <h4>Tips & stress</h4>
+                  <h4>Coaching tips</h4>
                   <ul>{assessment.tips.map((t, i) => <li key={i}>{t}</li>)}</ul>
                 </div>
               )}
-              {!!assessment.suggestedPractice?.length && (
+              {!!(assessment.practiceChunks?.length || assessment.suggestedPractice?.length) && (
                 <div className="analysis-section">
                   <h4>Practice chunks</h4>
-                  <ul>{assessment.suggestedPractice.map((p, i) => <li key={i}>{p}</li>)}</ul>
+                  <ul>{(assessment.practiceChunks?.length ? assessment.practiceChunks : assessment.suggestedPractice).map((p, i) => (
+                    <li key={i}>{p}</li>
+                  ))}</ul>
                 </div>
               )}
+              {assessment.nextPhraseRecommendation ? (
+                <div className="analysis-section">
+                  <h4>Try next</h4>
+                  <p>{assessment.nextPhraseRecommendation}</p>
+                </div>
+              ) : null}
             </div>
           )}
         </div>
@@ -2019,7 +2040,7 @@ const Dashboard = () => {
         : 'Every sentence is progress. Keep your pace consistent and focused.';
 
   return (
-    <div className="dashboard">
+    <div className="dashboard page-enter">
       <div className="ambient-orb ambient-orb-a" aria-hidden="true"></div>
       <div className="ambient-orb ambient-orb-b" aria-hidden="true"></div>
       <div className="ambient-grid" aria-hidden="true"></div>
@@ -2798,14 +2819,19 @@ const ChatPage = () => {
     return newMessage;
   }, []);
 
-  const runLiveAnalysis = useCallback(async (message, botReply = '') => {
+  const runLiveAnalysis = useCallback(async (message, botReply = '', metrics = {}) => {
     const text = String(message || '').trim();
     if (!text) return;
     setIsAnalyzingLive(true);
     try {
       const response = await axios.post(
         '/api/chat/partner/live-analysis',
-        { message: text, bot_reply: String(botReply || '') },
+        {
+          message: text,
+          bot_reply: String(botReply || ''),
+          typingMetrics: metrics.typingMetrics,
+          voiceMetrics: metrics.voiceMetrics,
+        },
         { timeout: 12000 }
       );
       setLiveAnalysis(response.data || null);
@@ -3040,7 +3066,7 @@ const ChatPage = () => {
       }
 
       addMessage(botResponse, 'bot');
-      runLiveAnalysis(trimmed, botResponse).catch(() => {});
+      runLiveAnalysis(trimmed, botResponse, { typingMetrics, voiceMetrics }).catch(() => {});
       setRetryCount(0);
 
       const nextMsgs = [...messagesRef.current, {
@@ -3170,7 +3196,7 @@ const ChatPage = () => {
 
   return (
     <div
-      className={`chat-page partner-chat ${isHistoricalMode ? 'historical-chat' : ''}`}
+      className={`chat-page partner-chat page-enter ${isHistoricalMode ? 'historical-chat' : ''}`}
       style={isHistoricalMode && selectedCharacter?.ambiance?.accentColor ? { '--character-accent': selectedCharacter.ambiance.accentColor } : undefined}
     >
       <header className="chat-header">
@@ -3260,7 +3286,7 @@ const ChatPage = () => {
           <div className="chat-main-column">
             <div className="chat-messages">
               {messages.map((message) => (
-                <div key={message.id} className={`message ${message.type}`}>
+                <div key={message.id} className={`message sw-message-enter ${message.type}`}>
                   <div className="message-content">
                     <p>{message.content}</p>
                   </div>
@@ -3306,65 +3332,69 @@ const ChatPage = () => {
               <h3>Feedback</h3>
               {isAnalyzingLive && <span className="chat-analysis-status">Observing…</span>}
             </div>
-            {!liveAnalysis ? (
-              <div className="chat-analysis-content">
+            <div className="chat-analysis-content">
+              <p className="feedback-disclaimer">
+                AI-inferred from your message and speaking behavior — not clinical diagnosis.
+              </p>
+              {!liveAnalysis ? (
                 <p className="chat-analysis-empty">
-                  Send a message and keep the flow going. You will get live guidance without breaking the conversation.
+                  Send a message to see coaching notes here without breaking the conversation flow.
                 </p>
-                <div className="analysis-list-block">
-                  <h4>Emotion Panel</h4>
-                  {[
-                    ['Confidence', emotionState?.confidence, 'good'],
-                    ['Nervousness', emotionState?.nervousness, (emotionState?.nervousness ?? 0) > 60 ? 'bad' : 'neutral'],
-                    ['Frustration', emotionState?.frustration, (emotionState?.frustration ?? 0) > 60 ? 'bad' : 'neutral'],
-                    ['Engagement', emotionState?.engagement, (emotionState?.engagement ?? 100) < 40 ? 'bad' : 'good'],
-                  ].map(([label, value, cls]) => (
-                    <div key={label} className="emotion-row">
-                      <span>{label}</span>
-                      <span className={`emotion-pill ${cls}`}>{typeof value === 'number' ? `${value}%` : '--'}</span>
+              ) : (
+                <>
+                  <div className="feedback-inference-card">
+                    {liveAnalysis.emotion ? (
+                      <div className="feedback-emotion-row">
+                        <span className="feedback-emotion-label">{capitalizeWord(liveAnalysis.emotion)}</span>
+                        <span className="analysis-pill">{formatIntentLabel(liveAnalysis.intent)}</span>
+                      </div>
+                    ) : null}
+                    <p className="chat-analysis-summary">{liveAnalysis.summary}</p>
+                    <div className="chat-analysis-meta">
+                      {liveAnalysis.responseStyle ? (
+                        <span className="analysis-pill">{`Style: ${capitalizeWord(liveAnalysis.responseStyle)}`}</span>
+                      ) : null}
+                      <span className="analysis-pill">{`Confidence: ${Math.round(Number(liveAnalysis.confidence || 0) * 100)}%`}</span>
                     </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="chat-analysis-content">
-                <p className="chat-analysis-summary">{liveAnalysis.summary}</p>
-                <div className="chat-analysis-meta">
-                  <span className="analysis-pill">{`Tone: ${liveAnalysis.tone || 'neutral'}`}</span>
-                  <span className="analysis-pill">{`Confidence: ${Math.round(Number(liveAnalysis.confidence || 0) * 100)}%`}</span>
-                </div>
-                <div className="analysis-list-block">
-                  <h4>Strengths</h4>
-                  <ul>
-                    {(liveAnalysis.strengths || []).map((item, idx) => <li key={`strength-${idx}`}>{item}</li>)}
-                  </ul>
-                </div>
-                <div className="analysis-list-block">
-                  <h4>Next Improvements</h4>
-                  <ul>
-                    {(liveAnalysis.improvements || []).map((item, idx) => <li key={`improve-${idx}`}>{item}</li>)}
-                  </ul>
-                </div>
-                <div className="analysis-list-block">
-                  <h4>Suggested Next Line</h4>
-                  <p className="suggested-reply">{liveAnalysis.suggested_reply}</p>
-                </div>
-                <div className="analysis-list-block">
-                  <h4>Emotion Panel</h4>
-                  {[
-                    ['Confidence', emotionState?.confidence, 'good'],
-                    ['Nervousness', emotionState?.nervousness, (emotionState?.nervousness ?? 0) > 60 ? 'bad' : 'neutral'],
-                    ['Frustration', emotionState?.frustration, (emotionState?.frustration ?? 0) > 60 ? 'bad' : 'neutral'],
-                    ['Engagement', emotionState?.engagement, (emotionState?.engagement ?? 100) < 40 ? 'bad' : 'good'],
-                  ].map(([label, value, cls]) => (
-                    <div key={label} className="emotion-row">
-                      <span>{label}</span>
-                      <span className={`emotion-pill ${cls}`}>{typeof value === 'number' ? `${value}%` : '--'}</span>
+                  </div>
+                  <div className="analysis-list-block">
+                    <h4>Strengths</h4>
+                    <ul>
+                      {(liveAnalysis.strengths || []).map((item, idx) => <li key={`strength-${idx}`}>{item}</li>)}
+                    </ul>
+                  </div>
+                  <div className="analysis-list-block">
+                    <h4>Next improvements</h4>
+                    <ul>
+                      {(liveAnalysis.improvements || []).map((item, idx) => <li key={`improve-${idx}`}>{item}</li>)}
+                    </ul>
+                  </div>
+                  {liveAnalysis.suggested_reply ? (
+                    <div className="analysis-list-block">
+                      <h4>Suggested next line</h4>
+                      <p className="suggested-reply">{liveAnalysis.suggested_reply}</p>
                     </div>
-                  ))}
-                </div>
+                  ) : null}
+                </>
+              )}
+              <div className="analysis-list-block speaking-signals-block">
+                <h4>Speaking signals</h4>
+                {[
+                  ['Confidence', emotionState?.confidence, 'good'],
+                  ['Nervousness', emotionState?.nervousness, (emotionState?.nervousness ?? 0) > 60 ? 'bad' : 'neutral'],
+                  ['Frustration', emotionState?.frustration, (emotionState?.frustration ?? 0) > 60 ? 'bad' : 'neutral'],
+                  ['Engagement', emotionState?.engagement, (emotionState?.engagement ?? 100) < 40 ? 'bad' : 'good'],
+                ].map(([label, value, cls]) => (
+                  <div key={label} className="emotion-row">
+                    <span>{label}</span>
+                    <div className="signal-meter" aria-hidden="true">
+                      <div className={`signal-meter-fill ${cls}`} style={{ width: `${typeof value === 'number' ? value : 0}%` }} />
+                    </div>
+                    <span className={`emotion-pill ${cls}`}>{typeof value === 'number' ? `${value}%` : '--'}</span>
+                  </div>
+                ))}
               </div>
-            )}
+            </div>
           </aside>
         </div>
 
@@ -3496,10 +3526,10 @@ const HistoricalCharactersPage = () => {
   };
 
   return (
-    <div className="dashboard">
+    <div className="dashboard page-enter">
       <header className="dashboard-header">
         <div className="header-content">
-          <h1>🏛️ Speak with Characters</h1>
+          <h1>Speak with Characters</h1>
           <p>Practice English with historical and fictional personas.</p>
         </div>
         <div className="header-actions">
@@ -3653,7 +3683,7 @@ const ProfilePage = () => {
   const progressSummary = buildProgressSummary(profile, userStats || {}, {});
 
   return (
-    <div className="profile-page">
+    <div className="profile-page page-enter">
       {pendingLevel && (
         <div className="confirm-modal-overlay" role="presentation">
           <div className="confirm-modal" role="dialog" aria-modal="true">
@@ -3933,7 +3963,7 @@ const LeaderboardPage = () => {
   const podiumOrder = podium.length === 3 ? [podium[1], podium[0], podium[2]] : podium;
 
   return (
-    <div className="dashboard">
+    <div className="dashboard page-enter">
       <header className="dashboard-header">
         <div className="header-content"><h1>Weekly Leaderboard</h1></div>
         <div className="header-actions"><button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button></div>
@@ -3984,20 +4014,46 @@ const LeaderboardPage = () => {
   );
 };
 
-const FLASHCARD_CACHE_KEY = 'sw-flashcards-cache-v1';
+const FLASHCARD_CACHE_KEY = 'sw-flashcards-cache-v2';
+const STUDY_DECK_TOTAL = 30;
+
+const STUDY_BADGE_CLASS = {
+  Grammar: 'badge-grammar',
+  Vocabulary: 'badge-vocabulary',
+  Tense: 'badge-tense',
+  Correction: 'badge-correction',
+  Pronunciation: 'badge-pronunciation',
+};
+
+const resolveStudyBadge = (card) => {
+  const label = card?.studyCategory
+    || (String(card?.errorTag || '').startsWith('study_')
+      ? String(card.errorTag).replace('study_', '').replace(/^./, (c) => c.toUpperCase())
+      : 'Grammar');
+  if (label === 'Pronunciation') return 'Pronunciation';
+  if (label === 'Vocabulary') return 'Vocabulary';
+  if (label === 'Tense') return 'Tense';
+  if (label === 'Correction') return 'Correction';
+  return 'Grammar';
+};
 
 const FlashcardsPage = () => {
   const [cards, setCards] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [revealAnswer, setRevealAnswer] = useState(false);
+  const [flipped, setFlipped] = useState(false);
   const [reviewSaving, setReviewSaving] = useState(false);
   const [speakLoading, setSpeakLoading] = useState(false);
-  const [generating, setGenerating] = useState(false);
-  const [practicePhrase, setPracticePhrase] = useState('');
+  const [deckLoading, setDeckLoading] = useState(false);
+  const [sessionTotal, setSessionTotal] = useState(0);
+  const [completedCount, setCompletedCount] = useState(0);
+  const [sessionDone, setSessionDone] = useState(false);
   const navigate = useNavigate();
 
   const activeCard = cards[activeIndex] || null;
+  const studyBadge = activeCard ? resolveStudyBadge(activeCard) : 'Grammar';
+  const isPronunciationCard = studyBadge === 'Pronunciation';
+  const cardPosition = completedCount + 1;
 
   const speakText = useCallback((text) => {
     const content = String(text || '').trim();
@@ -4016,69 +4072,75 @@ const FlashcardsPage = () => {
     });
   }, [speakLoading]);
 
-  const refresh = useCallback(async ({ background = false } = {}) => {
-    if (!background) setLoading(true);
+  const applyDeck = useCallback((incomingCards) => {
+    const deck = Array.isArray(incomingCards) ? incomingCards : [];
+    setCards(deck);
+    setActiveIndex(0);
+    setFlipped(false);
+    setCompletedCount(0);
+    setSessionDone(deck.length === 0);
+    setSessionTotal(deck.length || STUDY_DECK_TOTAL);
     try {
-      const res = await axios.get(`${GAMIFICATION_BASE}/api/v1/gamification/flashcards/due/me?limit=20`, {
-        headers: authHeaders(),
-        timeout: 15000,
-      });
-      const incomingCards = res.data?.cards || [];
-      setCards(incomingCards);
-      setActiveIndex(0);
-      setRevealAnswer(false);
-      try {
-        sessionStorage.setItem(FLASHCARD_CACHE_KEY, JSON.stringify(incomingCards));
-      } catch (_) { /* ignore */ }
-    } finally {
-      if (!background) setLoading(false);
-    }
+      sessionStorage.setItem(FLASHCARD_CACHE_KEY, JSON.stringify(deck));
+    } catch (_) { /* ignore */ }
   }, []);
 
-  const resetDemoDeck = useCallback(async () => {
-    setGenerating(true);
+  const loadStudyDeck = useCallback(async ({ background = false, reset = false } = {}) => {
+    if (!background) setLoading(true);
     try {
-      await axios.post(
-        `${GAMIFICATION_BASE}/api/v1/gamification/flashcards/reset-demo`,
-        { limit: 20 },
-        { headers: authHeaders(), timeout: 20000 }
+      if (reset) {
+        setDeckLoading(true);
+        const resetRes = await axios.post(
+          `${GAMIFICATION_BASE}/api/v1/gamification/flashcards/reset-demo`,
+          {},
+          { headers: authHeaders(), timeout: 20000 }
+        );
+        applyDeck(resetRes.data?.cards || []);
+        return;
+      }
+      const res = await axios.get(
+        `${GAMIFICATION_BASE}/api/v1/gamification/flashcards/due/me?limit=${STUDY_DECK_TOTAL}`,
+        { headers: authHeaders(), timeout: 15000 }
       );
-      await refresh();
+      applyDeck(res.data?.cards || []);
     } catch (err) {
-      showAppToast(err?.response?.data?.error || 'Could not reset flashcards right now.', 'error');
+      showAppToast(err?.response?.data?.error || 'Could not load flashcards.', 'error');
     } finally {
-      setGenerating(false);
+      if (!background) setLoading(false);
+      setDeckLoading(false);
     }
-  }, [refresh]);
+  }, [applyDeck]);
 
   useEffect(() => {
+    let usedCache = false;
     try {
       const cached = sessionStorage.getItem(FLASHCARD_CACHE_KEY);
       if (cached) {
         const parsed = JSON.parse(cached);
         if (Array.isArray(parsed) && parsed.length) {
-          setCards(parsed);
+          applyDeck(parsed);
           setLoading(false);
+          usedCache = true;
         }
       }
     } catch (_) { /* ignore */ }
-    refresh({ background: !!sessionStorage.getItem(FLASHCARD_CACHE_KEY) });
-  }, [refresh]);
+    loadStudyDeck({ background: usedCache });
+  }, [applyDeck, loadStudyDeck]);
 
   const advanceAfterReview = useCallback((removedId) => {
+    setFlipped(false);
+    setCompletedCount((c) => c + 1);
     setCards((prev) => {
       const idx = prev.findIndex((c) => c._id === removedId);
       const next = prev.filter((c) => c._id !== removedId);
       if (!next.length) {
         setActiveIndex(0);
+        setSessionDone(true);
       } else if (idx >= next.length) {
         setActiveIndex(next.length - 1);
-      } else {
-        setActiveIndex(idx);
       }
       return next;
     });
-    setRevealAnswer(false);
   }, []);
 
   const review = async (mistakeId, result) => {
@@ -4090,7 +4152,19 @@ const FlashcardsPage = () => {
         { mistakeId, result },
         { headers: authHeaders(), timeout: 12000 }
       );
-      advanceAfterReview(mistakeId);
+      if (result === 'easy') {
+        advanceAfterReview(mistakeId);
+      } else {
+        setFlipped(false);
+        setCompletedCount((c) => c + 1);
+        setCards((prev) => {
+          const idx = prev.findIndex((c) => c._id === mistakeId);
+          if (idx < 0) return prev;
+          const card = prev[idx];
+          const rest = prev.filter((c) => c._id !== mistakeId);
+          return [...rest, card];
+        });
+      }
     } catch (err) {
       showAppToast('Could not save your review. Please try again.', 'error');
     } finally {
@@ -4098,140 +4172,148 @@ const FlashcardsPage = () => {
     }
   };
 
-  const cardTypeLabel = (card) => {
-    const subtype = card?.cardSubtype || card?.cardType || 'review';
-    return String(subtype).replace(/_/g, ' ');
+  const handleFlip = () => {
+    if (!flipped && activeCard) setFlipped(true);
   };
 
-  const isPronunciationCard = activeCard
-    && (activeCard.cardType === 'pronunciation_review' || activeCard.cardSubtype === 'pronunciation');
-
-  const speakTarget = isPronunciationCard && activeCard
-    ? (activeCard.focusWord || activeCard.cardBack || activeCard.correctedForm)
+  const frontText = activeCard?.cardFront || '';
+  const backText = activeCard?.cardBack || activeCard?.correctedForm || '';
+  const explanation = activeCard?.cardExplanation || '';
+  const hearTarget = isPronunciationCard
+    ? (activeCard?.focusWord || activeCard?.correctedForm || backText)
     : '';
 
   return (
-    <div className="dashboard flashcards-page-v2">
-      <header className="dashboard-header">
-        <div className="header-content"><h1>Flashcards</h1></div>
-        <div className="header-actions">
-          <button type="button" className="btn-secondary" disabled={generating} onClick={resetDemoDeck}>
-            {generating ? 'Resetting...' : 'Start practice'}
-          </button>
-          <button type="button" className="btn-secondary" onClick={() => navigate('/stats')}>Back</button>
-        </div>
+    <div className="flashcards-study-page page-enter">
+      <header className="flashcards-study-header">
+        <button type="button" className="btn-ghost back-button" onClick={() => navigate('/stats')}>
+          ← Back
+        </button>
+        <h1>Flashcards</h1>
+        <button
+          type="button"
+          className="btn-ghost"
+          disabled={deckLoading}
+          onClick={() => loadStudyDeck({ reset: true })}
+        >
+          {deckLoading ? 'Loading…' : 'Restart deck'}
+        </button>
       </header>
 
-      <div className="stats-overview flashcards-shell">
+      <div className="flashcards-study-body">
         {loading ? (
-          <div className="inline-loading centered-loading"><div className="loading-spinner"></div><span>Loading flashcards...</span></div>
-        ) : cards.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">📚</div>
-            <div className="empty-state-title">No flashcards ready</div>
-            <div className="empty-state-description">Load a useful demo deck for your presentation.</div>
-            <button type="button" className="btn-primary" disabled={generating} onClick={resetDemoDeck}>
-              {generating ? 'Loading deck...' : 'Start practice'}
-            </button>
+          <div className="flashcards-study-loading">
+            <div className="loading-spinner" />
+            <span>Loading deck…</span>
           </div>
-        ) : activeCard && (
-          <div className="fc-review-layout">
-            <div className="fc-progress-header">
-              <span>{`Card ${activeIndex + 1} of ${cards.length}`}</span>
-              <div className="fc-progress-track" aria-hidden="true">
-                <div className="fc-progress-fill" style={{ width: `${((activeIndex + 1) / cards.length) * 100}%` }} />
-              </div>
+        ) : sessionDone ? (
+          <div className="flashcards-session-complete">
+            <div className="flashcards-complete-icon">✓</div>
+            <h2>Session complete</h2>
+            <p>You reviewed {sessionTotal} cards. Great work.</p>
+            <div className="flashcards-complete-actions">
+              <button type="button" className="btn-primary" disabled={deckLoading} onClick={() => loadStudyDeck({ reset: true })}>
+                Study again
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => navigate('/stats')}>
+                Back to dashboard
+              </button>
+            </div>
+          </div>
+        ) : activeCard ? (
+          <div className="flashcards-study-stage">
+            <div className="flashcards-progress-label">
+              {`Card ${Math.min(cardPosition, sessionTotal)} of ${sessionTotal}`}
+            </div>
+            <div className="flashcards-progress-track" aria-hidden="true">
+              <div
+                className="flashcards-progress-fill"
+                style={{ width: `${Math.min(100, (completedCount / sessionTotal) * 100)}%` }}
+              />
             </div>
 
-            <article className={`fc-card fc-flip-card ${revealAnswer ? 'is-flipped is-revealed' : ''}`}>
-              <div className={`fc-card-inner flashcard-inner ${revealAnswer ? 'flipped' : ''}`}>
-                <div className="fc-card-face fc-card-front-face flashcard-front">
-                  <div className="fc-card-top">
-                    <span className="fc-type-badge">{cardTypeLabel(activeCard)}</span>
-                    {activeCard.focusWord ? <span className="fc-focus-badge">{`Focus: ${activeCard.focusWord}`}</span> : null}
-                  </div>
-                  <h3 className="fc-prompt-label">Question</h3>
-                  <p className="fc-card-front">{activeCard.cardFront || activeCard.whatIncorrect}</p>
-                  {!!activeCard.cardOptions?.length && (
-                    <div className="flashcard-options-grid">
-                      {activeCard.cardOptions.map((opt) => (
-                        <span key={opt} className="flashcard-option">{opt}</span>
-                      ))}
-                    </div>
+            <div
+              className={`flashcards-flip-scene ${flipped ? 'is-flipped' : ''}`}
+              onClick={!flipped ? handleFlip : undefined}
+              onKeyDown={(e) => { if (!flipped && (e.key === 'Enter' || e.key === ' ')) handleFlip(); }}
+              role="button"
+              tabIndex={flipped ? -1 : 0}
+              aria-label={flipped ? 'Answer side' : 'Question side — click to flip'}
+            >
+              <div className="flashcards-flip-inner">
+                <div className="flashcards-face flashcards-face-front">
+                  <span className={`flashcards-type-badge ${STUDY_BADGE_CLASS[studyBadge] || ''}`}>
+                    {studyBadge}
+                  </span>
+                  <p className="flashcards-face-label">Question</p>
+                  <div className="flashcards-face-text">{frontText}</div>
+                  {!flipped && (
+                    <button
+                      type="button"
+                      className="flashcards-flip-btn"
+                      onClick={(e) => { e.stopPropagation(); handleFlip(); }}
+                    >
+                      Flip card
+                    </button>
                   )}
                 </div>
 
-                <div className="fc-card-face fc-card-back-face flashcard-back">
-                  <h3 className="fc-prompt-label">Answer</h3>
-                  <p className="fc-card-back">{activeCard.cardBack || activeCard.improvedPhrasing || activeCard.correctedForm}</p>
-                  {activeCard.cardExplanation ? (
-                    <p className="fc-explanation"><strong>Explanation:</strong> {activeCard.cardExplanation}</p>
+                <div className="flashcards-face flashcards-face-back">
+                  <span className={`flashcards-type-badge ${STUDY_BADGE_CLASS[studyBadge] || ''}`}>
+                    {studyBadge}
+                  </span>
+                  <p className="flashcards-face-label">Answer</p>
+                  <div className="flashcards-face-text flashcards-answer-text">{backText}</div>
+                  {explanation ? (
+                    <div className="flashcards-explanation">
+                      <span className="flashcards-explanation-label">Explanation</span>
+                      <p>{explanation}</p>
+                    </div>
+                  ) : null}
+                  {isPronunciationCard && hearTarget ? (
+                    <button
+                      type="button"
+                      className="flashcards-hear-btn"
+                      disabled={speakLoading}
+                      onClick={(e) => { e.stopPropagation(); speakText(hearTarget); }}
+                    >
+                      {speakLoading ? 'Playing…' : 'Hear example 🔊'}
+                    </button>
                   ) : null}
                 </div>
               </div>
+            </div>
 
-              <div className="fc-action-row">
+            {flipped && (
+              <div className="flashcards-review-bar">
                 <button
                   type="button"
-                  className="btn-primary"
+                  className="flashcards-btn-got-it"
                   disabled={reviewSaving}
-                  onClick={() => setRevealAnswer((v) => !v)}
+                  onClick={() => review(activeCard._id, 'easy')}
                 >
-                  {revealAnswer ? 'Show Question' : 'Flip Card'}
+                  {reviewSaving ? 'Saving…' : '✓ Got it'}
                 </button>
-                {isPronunciationCard && (
-                  <>
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={!speakTarget || speakLoading || reviewSaving}
-                      onClick={() => speakText(speakTarget)}
-                    >
-                      {speakLoading ? 'Playing...' : '🔊 Hear Word'}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={reviewSaving}
-                      onClick={() => setPracticePhrase(activeCard.focusWord || activeCard.originalUtterance || activeCard.cardFront)}
-                    >
-                      🎤 Practice Pronunciation
-                    </button>
-                  </>
-                )}
+                <button
+                  type="button"
+                  className="flashcards-btn-again"
+                  disabled={reviewSaving}
+                  onClick={() => review(activeCard._id, 'hard')}
+                >
+                  ↻ Review again
+                </button>
               </div>
-
-              {revealAnswer && (
-                <div className="fc-review-row">
-                  <button
-                    type="button"
-                    className="btn-primary"
-                    disabled={reviewSaving}
-                    onClick={() => review(activeCard._id, 'easy')}
-                  >
-                    {reviewSaving ? 'Saving...' : 'Got it'}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    disabled={reviewSaving}
-                    onClick={() => review(activeCard._id, 'hard')}
-                  >
-                    Review again
-                  </button>
-                </div>
-              )}
-            </article>
+            )}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <div className="empty-state-title">No cards in deck</div>
+            <button type="button" className="btn-primary" disabled={deckLoading} onClick={() => loadStudyDeck({ reset: true })}>
+              Load study deck
+            </button>
           </div>
         )}
       </div>
-
-      {practicePhrase ? (
-        <AdvancedPronunciationAssessment
-          initialPhrase={practicePhrase}
-          onClose={() => setPracticePhrase('')}
-        />
-      ) : null}
     </div>
   );
 };
@@ -4312,7 +4394,7 @@ const QuizPage = () => {
   };
 
   return (
-    <div className="dashboard">
+    <div className="dashboard page-enter">
       <header className="dashboard-header">
         <div className="header-content"><h1>Grammar Quiz</h1></div>
         <div className="header-actions">
@@ -4333,9 +4415,21 @@ const QuizPage = () => {
       </header>
       <div className="quiz-page-shell">
         {loading ? (
-          <div className="inline-loading centered-loading"><div className="loading-spinner"></div><span>Loading quiz...</span></div>
+          <div className="quiz-skeleton-stack" aria-busy="true" aria-label="Loading quiz">
+            {[1, 2, 3].map((n) => (
+              <div key={n} className="quiz-card quiz-skeleton-card">
+                <div className="skeleton-line skeleton-short" />
+                <div className="skeleton-line skeleton-long" />
+                <div className="skeleton-line skeleton-mid" />
+              </div>
+            ))}
+          </div>
         ) : questions.length === 0 ? (
-          <p>No quiz questions available yet.</p>
+          <div className="empty-state">
+            <div className="empty-state-title">No questions available</div>
+            <div className="empty-state-description">Try again in a moment or pick a different difficulty.</div>
+            <button type="button" className="btn-primary" onClick={() => loadQuestions()}>Retry</button>
+          </div>
         ) : (
           <>
             {questions.map((q, idx) => {
@@ -4370,26 +4464,26 @@ const QuizPage = () => {
               </div>
             )}
             {result && (
-              <div className="quiz-card">
+              <div className="quiz-card quiz-result-card score-reveal">
                 <div className="quiz-score-display">
                   <div className="quiz-score-number">{result.score}%</div>
                   <div className="quiz-score-label">{`${result.correctCount} correct · ${result.xpAwarded} XP earned`}</div>
                 </div>
                 {Array.isArray(result.graded) && result.graded.length > 0 && (
-                  <div style={{ marginTop: '1rem' }}>
+                  <div className="quiz-result-list">
                     {result.graded.map((g, idx) => (
                       <div
                         key={`${g.questionId}-${idx}`}
                         className={g.correct ? 'quiz-result-correct' : 'quiz-result-incorrect'}
                       >
-                        <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                        <div className="quiz-result-question">
                           {`Q${idx + 1}: ${g.questionText || 'Question'}`}
                         </div>
                         <div>{`Your answer: ${g.userAnswer}`}</div>
                         <div>{`Correct answer: ${g.correctAnswer}`}</div>
-                        <div style={{ fontWeight: 700 }}>{g.correct ? 'Correct' : 'Incorrect'}</div>
+                        <div className="quiz-result-verdict">{g.correct ? 'Correct' : 'Incorrect'}</div>
                         {!g.correct && g.explanation ? (
-                          <div style={{ opacity: 0.85, marginTop: 4 }}>{`Why: ${g.explanation}`}</div>
+                          <div className="quiz-result-explanation">{`Why: ${g.explanation}`}</div>
                         ) : null}
                       </div>
                     ))}

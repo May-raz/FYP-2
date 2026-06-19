@@ -27,6 +27,10 @@ import {
   listPracticePhrases,
   pickPracticePhrase,
 } from '../services/pronunciationAssessmentService';
+import {
+  emotionInferenceToLiveAnalysis,
+  inferEmotionWithLlm,
+} from '../services/emotionInferenceService';
 import { getVoiceProfile } from '../config/voiceConfig';
 
 const router = Router();
@@ -894,13 +898,16 @@ router.post('/chat/partner/stream', async (req: Request, res: Response) => {
     if (item?.bot_response) h.push({ role: 'assistant', content: String(item.bot_response) });
     return h;
   });
-  const structuredReply = await generateStructuredReply({
-    message,
-    persona,
-    adaptiveInstruction,
-    challengeMode,
-    history,
-  });
+  const [structuredReply, emotionInference] = await Promise.all([
+    generateStructuredReply({
+      message,
+      persona,
+      adaptiveInstruction,
+      challengeMode,
+      history,
+    }),
+    inferEmotionWithLlm({ message, typingMetrics, voiceMetrics }),
+  ]);
 
   let chatPayload: StructuredChatResponse = structuredReply ?? {
     reply: persona
@@ -929,17 +936,22 @@ router.post('/chat/partner/stream', async (req: Request, res: Response) => {
   if (!structuredReply) {
     if (emotionState.nervousness > 70) {
       chatPayload.reply = `Hey, you're doing fine. What's on your mind today?`;
-      chatPayload.emotion = { detected: 'nervous', confidence: 0.75, reason: 'High nervousness signals.' };
     } else if (emotionState.confidence > 70) {
       chatPayload.reply = `Nice — what's your take on something you've been thinking about lately?`;
-      chatPayload.emotion = { detected: 'confident', confidence: 0.72, reason: 'High confidence signals.' };
     } else if (emotionState.frustration > 60) {
       chatPayload.reply = `No pressure — we can keep it simple. What would you like to talk about?`;
-      chatPayload.emotion = { detected: 'frustrated', confidence: 0.7, reason: 'Frustration signals detected.' };
     } else if (emotionState.engagement < 40) {
       chatPayload.reply = `Quick one — what's something fun you did this week?`;
-      chatPayload.emotion = { detected: 'bored', confidence: 0.55, reason: 'Low engagement signals.' };
     }
+  }
+
+  if (emotionInference) {
+    chatPayload.emotion = {
+      detected: emotionInference.emotion,
+      confidence: emotionInference.confidence,
+      reason: emotionInference.reason,
+    };
+    chatPayload.conversationIntent = emotionInference.intent;
   }
 
   const issue = detectEnglishRuleIssue(message);
@@ -1160,36 +1172,14 @@ router.post('/chat/session-summary', async (req: Request, res: Response) => {
 
 router.post('/chat/partner/live-analysis', async (req: Request, res: Response) => {
   const message = String(req.body?.message ?? '').trim();
-  const lower = message.toLowerCase();
-  const negative = /hell|damn|stupid|idiot|hate/.test(lower);
-  const identity = /who are you|what are you/.test(lower);
-  const pronunciation = /\b(pronounc|accent|how (do|to) say)\b/.test(lower);
-  const question = message.endsWith('?') || /^(what|why|how|can you|could you)\b/.test(lower);
-  const emotional = /\b(nervous|sad|stressed|worried|scared|frustrated)\b/.test(lower);
-  const intent = pronunciation
-    ? 'pronunciation_help'
-    : identity
-      ? 'identity challenge'
-      : emotional
-        ? 'emotional'
-        : question
-          ? 'question'
-          : 'conversation';
-  res.json({
-    summary: identity
-      ? 'User is asking about the assistant.'
-      : emotional
-        ? 'User is sharing how they feel — respond with warmth first.'
-        : pronunciation
-          ? 'User wants pronunciation or accent help.'
-          : 'User is practicing natural English conversation.',
-    tone: negative ? 'negative' : emotional ? 'supportive' : 'neutral',
-    intent,
-    confidence: 0.82,
-    strengths: ['You are actively practicing in English.'],
-    improvements: question ? ['Answer simply, then ask one follow-up.'] : ['Keep building on the last topic.'],
-    suggested_reply: question ? 'What made you curious about that?' : 'Tell me a bit more about that.',
-  });
+  const typingMetrics = (req.body?.typingMetrics ?? {}) as TypingMetrics;
+  const voiceMetrics = (req.body?.voiceMetrics ?? {}) as VoiceMetrics;
+  if (!message) {
+    res.status(400).json({ error: 'message is required' });
+    return;
+  }
+  const inference = await inferEmotionWithLlm({ message, typingMetrics, voiceMetrics });
+  res.json(emotionInferenceToLiveAnalysis(inference, message));
 });
 
 router.get('/chat/emotion-summary/:sessionId', async (req: Request, res: Response) => {

@@ -7,7 +7,7 @@ import { MistakeModel } from '../models/Mistake';
 import { QuestionBankModel } from '../models/QuestionBank';
 import { QuizResultModel } from '../models/QuizResult';
 import { GamificationSessionModel } from '../models/Session';
-import { runFullDemoSeed, isJunkMistake } from '../services/demoSeedService';
+import { runFullDemoSeed } from '../services/demoSeedService';
 import {
   ensureQuestionBankSeeded,
   generateFlashcardsWithLlm,
@@ -17,6 +17,12 @@ import {
   isLowValueCard,
   persistFlashcards,
 } from '../services/learningContentService';
+import {
+  getStudyDeck,
+  isStudyDeckCard,
+  STUDY_DECK_SIZE,
+  studyCategoryLabel,
+} from '../services/studyDeckService';
 
 const router = Router();
 router.use(requireAuth);
@@ -111,16 +117,6 @@ function subtypeToCardType(subtype: string): CardKind {
   return map[subtype] ?? 'grammar_correction';
 }
 
-function isMeaningfulCard(m: any): boolean {
-  if (isJunkMistake(m)) return false;
-  const front = String(m.cardFront ?? '').trim();
-  const back = String(m.cardBack ?? '').trim();
-  if (front && back && front !== back) return true;
-  const original = String(m.originalUtterance ?? '').trim();
-  const corrected = String(m.correctedForm ?? '').trim();
-  return !isLowValueCard(original, corrected);
-}
-
 function toCard(m: any) {
   const { original, corrected, cardType, focusWord, errorReason, tokenDiff } = deriveCardInsights(m);
   const storedFront = String(m.cardFront ?? '').trim();
@@ -155,6 +151,7 @@ function toCard(m: any) {
     cardBack: displayBack,
     cardExplanation: displayExplanation,
     cardOptions: Array.isArray(m.cardOptions) ? m.cardOptions.map(String) : [],
+    studyCategory: studyCategoryLabel(String(m.errorTag ?? '')),
     whatIncorrect: displayFront,
     whyIncorrect: displayExplanation,
     correctedSentence: displayBack,
@@ -271,40 +268,38 @@ router.get('/leaderboard', async (req: Request, res: Response) => {
 });
 
 router.get('/flashcards/due/me', async (req: Request, res: Response) => {
-  const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? '10'), 10) || 10));
+  const limit = Math.min(STUDY_DECK_SIZE, Math.max(1, parseInt(String(req.query.limit ?? String(STUDY_DECK_SIZE)), 10) || STUDY_DECK_SIZE));
   const userId = new mongoose.Types.ObjectId(req.gamer!.userId);
 
   let cards = await MistakeModel.find({
     userId,
     nextReviewDate: { $lte: new Date() },
   })
-    .sort({ nextReviewDate: 1, reviewCount: -1, easeFactor: 1 })
-    .limit(Math.max(limit * 3, limit))
+    .sort({ createdAt: 1, nextReviewDate: 1 })
+    .limit(STUDY_DECK_SIZE * 2)
     .lean();
 
-  const meaningful = cards.filter(isMeaningfulCard);
-  if (meaningful.length < Math.min(4, limit)) {
-    await persistFlashcards(userId, getShuffledDemoDeck(Math.max(8, limit)));
+  const studyCards = cards.filter(isStudyDeckCard);
+  if (studyCards.length < STUDY_DECK_SIZE) {
+    await MistakeModel.deleteMany({ userId });
+    await persistFlashcards(userId, getStudyDeck());
     cards = await MistakeModel.find({
       userId,
       nextReviewDate: { $lte: new Date() },
     })
-      .sort({ nextReviewDate: 1, reviewCount: -1, easeFactor: 1 })
-      .limit(Math.max(limit * 3, limit))
+      .sort({ createdAt: 1 })
+      .limit(STUDY_DECK_SIZE)
       .lean();
   }
 
-  const enriched = cards.filter(isMeaningfulCard).map(toCard);
-  const prioritized = enriched
-    .sort((a: any, b: any) => computePriorityScore(b) - computePriorityScore(a))
-    .slice(0, limit);
+  const enriched = cards.filter(isStudyDeckCard).map(toCard).slice(0, limit);
   const summary = {
     totalDue: enriched.length,
-    pronunciationDue: prioritized.filter((c: any) => c.cardType === 'pronunciation_review').length,
-    grammarDue: prioritized.filter((c: any) => c.cardType === 'grammar_correction').length,
-    highPriority: prioritized.filter((c: any) => (c.lastReviewResult === 'incorrect' || c.lastReviewResult === 'hard')).length,
+    deckSize: STUDY_DECK_SIZE,
+    grammarDue: enriched.filter((c: any) => c.studyCategory === 'Grammar').length,
+    pronunciationDue: enriched.filter((c: any) => c.studyCategory === 'Pronunciation').length,
   };
-  res.json({ cards: prioritized, summary });
+  res.json({ cards: enriched, summary });
 });
 
 router.post('/flashcards/generate', async (req: Request, res: Response) => {
@@ -357,16 +352,14 @@ router.post('/flashcards/generate', async (req: Request, res: Response) => {
 
 router.post('/flashcards/reset-demo', async (req: Request, res: Response) => {
   const userId = new mongoose.Types.ObjectId(req.gamer!.userId);
-  const limit = Math.min(25, Math.max(15, parseInt(String(req.body?.limit ?? '20'), 10) || 20));
-  const userCards = await MistakeModel.find({ userId }).lean();
-  const junkIds = userCards.filter(isJunkMistake).map((m) => m._id);
-  if (junkIds.length) await MistakeModel.deleteMany({ _id: { $in: junkIds } });
-  const createdIds = await persistFlashcards(userId, getShuffledDemoDeck(limit));
-  const created = await MistakeModel.find({ _id: { $in: createdIds } }).lean();
+  await MistakeModel.deleteMany({ userId });
+  const createdIds = await persistFlashcards(userId, getStudyDeck());
+  const created = await MistakeModel.find({ _id: { $in: createdIds } }).sort({ createdAt: 1 }).lean();
   res.json({
-    removedJunk: junkIds.length,
+    removedAll: true,
     createdCount: createdIds.length,
     cards: created.map(toCard),
+    deckSize: STUDY_DECK_SIZE,
   });
 });
 
@@ -417,10 +410,10 @@ router.get('/quiz/questions', async (req: Request, res: Response) => {
   const difficulty = Math.min(3, Math.max(1, parseInt(String(req.query.difficulty ?? '0'), 10) || 0));
   const userId = new mongoose.Types.ObjectId(req.gamer!.userId);
 
-  await ensureQuestionBankSeeded();
+  void ensureQuestionBankSeeded().catch(() => {});
 
   const recentTexts = await getRecentQuizQuestionTexts(userId);
-  let pool = await QuestionBankModel.find({ type: quizType }).lean();
+  let pool = await QuestionBankModel.find({ type: quizType }).limit(120).lean();
   if (difficulty > 0) {
     pool = pool.filter((q) => Number(q.difficulty) === difficulty);
   }
