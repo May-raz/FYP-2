@@ -12,7 +12,8 @@
     "dev": "tsx watch src/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "seed:demo": "tsx src/scripts/demoSeed.ts"
+    "seed:demo": "tsx src/scripts/demoSeed.ts",
+    "cleanup:db": "tsx src/scripts/cleanupDatabase.ts"
   },
   "engines": {
     "node": ">=18"

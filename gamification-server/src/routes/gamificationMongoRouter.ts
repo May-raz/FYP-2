@@ -8,6 +8,7 @@ import { QuestionBankModel } from '../models/QuestionBank';
 import { QuizResultModel } from '../models/QuizResult';
 import { GamificationSessionModel } from '../models/Session';
 import { runFullDemoSeed } from '../services/demoSeedService';
+import { getDemoSeedSecret } from '../config/env';
 import {
   ensureQuestionBankSeeded,
   generateFlashcardsWithLlm,
@@ -632,9 +633,9 @@ router.post('/session/complete', async (req: Request, res: Response) => {
 });
 
 router.post('/admin/demo-seed', async (req: Request, res: Response) => {
-  const secret = String(process.env.DEMO_SEED_SECRET ?? 'speakwise-demo-2025').trim();
+  const secret = getDemoSeedSecret();
   const provided = String(req.headers['x-demo-seed-secret'] ?? req.body?.secret ?? '').trim();
-  if (!provided || provided !== secret) {
+  if (!secret || !provided || provided !== secret) {
     res.status(403).json({ error: 'Forbidden' });
     return;
   }

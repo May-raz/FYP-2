@@ -1,3 +1,4 @@
+/** @deprecated Legacy Supabase router — not mounted in app.ts. Use gamificationMongoRouter instead. */
 import { Router, type Request, type Response } from 'express';
 import crypto from 'crypto';
 import { XP_REWARDS } from '../constants/xp';

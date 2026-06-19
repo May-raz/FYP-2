@@ -32,16 +32,13 @@ import {
   inferEmotionWithLlm,
 } from '../services/emotionInferenceService';
 import { getVoiceProfile } from '../config/voiceConfig';
+import { getJwtSecret } from '../config/env';
 
 const router = Router();
 const transcriptionUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 12 * 1024 * 1024 },
 });
-
-function getJwtSecret(): string {
-  return process.env.JWT_SECRET_KEY ?? process.env.JWT_SECRET ?? 'english-tutor-secret-key-2025';
-}
 
 function getTokenDays(): number {
   const v = parseInt(process.env.JWT_ACCESS_TOKEN_DAYS ?? '7', 10);
@@ -879,8 +876,6 @@ router.post('/chat/partner/stream', async (req: Request, res: Response) => {
       })
     : { confidence: 50, nervousness: 30, frustration: 20, engagement: 50 };
   const adaptiveInstruction = buildAdaptiveInstruction(emotionState);
-  console.log('[emotion] raw-metrics', { typingMetrics, voiceMetrics, sentimentScore, grammarMistakeFrequency });
-  console.log('[emotion] computed-state', emotionState);
 
   const persona = characterMode ? getCharacterPersona(characterId) : null;
   const convoRows = Array.isArray(profile.conversation_history) ? profile.conversation_history : [];
