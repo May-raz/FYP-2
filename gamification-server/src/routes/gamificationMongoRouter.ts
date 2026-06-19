@@ -11,8 +11,9 @@ import { runFullDemoSeed, isJunkMistake } from '../services/demoSeedService';
 import {
   ensureQuestionBankSeeded,
   generateFlashcardsWithLlm,
-  generateQuizQuestionsWithLlm,
   getRecentQuizQuestionTexts,
+  getShuffledDemoDeck,
+  DEMO_GRAMMAR_QUESTIONS,
   isLowValueCard,
   persistFlashcards,
 } from '../services/learningContentService';
@@ -153,6 +154,7 @@ function toCard(m: any) {
     cardFront: displayFront,
     cardBack: displayBack,
     cardExplanation: displayExplanation,
+    cardOptions: Array.isArray(m.cardOptions) ? m.cardOptions.map(String) : [],
     whatIncorrect: displayFront,
     whyIncorrect: displayExplanation,
     correctedSentence: displayBack,
@@ -282,25 +284,7 @@ router.get('/flashcards/due/me', async (req: Request, res: Response) => {
 
   const meaningful = cards.filter(isMeaningfulCard);
   if (meaningful.length < Math.min(4, limit)) {
-    const recentMistakes = await MistakeModel.find({ userId })
-      .sort({ createdAt: -1 })
-      .limit(12)
-      .lean();
-    const sessionMistakes = recentMistakes
-      .filter((m) => !isLowValueCard(String(m.originalUtterance), String(m.correctedForm)))
-      .map((m) => ({
-        original: m.originalUtterance,
-        corrected: m.correctedForm,
-        type: m.errorType,
-        explanation: m.cardExplanation,
-        word: m.focusWord,
-      }));
-    const generated = await generateFlashcardsWithLlm({
-      userId: String(userId),
-      mistakesFromSession: sessionMistakes,
-      limit: Math.max(6, limit),
-    });
-    await persistFlashcards(userId, generated);
+    await persistFlashcards(userId, getShuffledDemoDeck(Math.max(8, limit)));
     cards = await MistakeModel.find({
       userId,
       nextReviewDate: { $lte: new Date() },
@@ -353,18 +337,36 @@ router.post('/flashcards/generate', async (req: Request, res: Response) => {
       })),
   ];
 
-  const generated = await generateFlashcardsWithLlm({
-    userId: String(userId),
-    mistakesFromSession: mergedMistakes,
-    recentChat: Array.isArray(req.body?.recentChat) ? req.body.recentChat : [],
-    limit,
-  });
+  const useDemoOnly = Boolean(req.body?.demoOnly) || mergedMistakes.length === 0;
+  const generated = useDemoOnly
+    ? getShuffledDemoDeck(limit)
+    : await generateFlashcardsWithLlm({
+        userId: String(userId),
+        mistakesFromSession: mergedMistakes,
+        recentChat: Array.isArray(req.body?.recentChat) ? req.body.recentChat : [],
+        limit,
+      });
   const createdIds = await persistFlashcards(userId, generated);
   const created = await MistakeModel.find({ _id: { $in: createdIds } }).lean();
   res.json({
     createdCount: createdIds.length,
     cards: created.map(toCard),
-    source: mergedMistakes.length > 0 ? 'user_history' : 'default_bank',
+    source: useDemoOnly ? 'default_bank' : (mergedMistakes.length > 0 ? 'user_history' : 'default_bank'),
+  });
+});
+
+router.post('/flashcards/reset-demo', async (req: Request, res: Response) => {
+  const userId = new mongoose.Types.ObjectId(req.gamer!.userId);
+  const limit = Math.min(25, Math.max(15, parseInt(String(req.body?.limit ?? '20'), 10) || 20));
+  const userCards = await MistakeModel.find({ userId }).lean();
+  const junkIds = userCards.filter(isJunkMistake).map((m) => m._id);
+  if (junkIds.length) await MistakeModel.deleteMany({ _id: { $in: junkIds } });
+  const createdIds = await persistFlashcards(userId, getShuffledDemoDeck(limit));
+  const created = await MistakeModel.find({ _id: { $in: createdIds } }).lean();
+  res.json({
+    removedJunk: junkIds.length,
+    createdCount: createdIds.length,
+    cards: created.map(toCard),
   });
 });
 
@@ -428,34 +430,28 @@ router.get('/quiz/questions', async (req: Request, res: Response) => {
 
   let selected = shuffled.slice(0, limit);
   if (selected.length < limit) {
-    const generated = await generateQuizQuestionsWithLlm({
-      userId: String(userId),
-      limit,
-      difficulty: difficulty || 2,
-      excludeTexts: [...recentTexts, ...selected.map((q) => String(q.questionText))],
-    });
-    for (const q of generated) {
-      const exists = await QuestionBankModel.findOne({ type: quizType, questionText: q.questionText }).lean();
-      if (exists) {
-        selected.push(exists);
-        continue;
+    for (const q of [...DEMO_GRAMMAR_QUESTIONS].sort(() => Math.random() - 0.5)) {
+      if (selected.length >= limit) break;
+      if (recentTexts.includes(q.questionText)) continue;
+      if (selected.some((s) => String(s.questionText) === q.questionText)) continue;
+      let exists = await QuestionBankModel.findOne({ type: quizType, questionText: q.questionText }).lean();
+      if (!exists) {
+        const saved = await QuestionBankModel.create({
+          type: quizType,
+          difficulty: q.difficulty,
+          questionText: q.questionText,
+          options: q.options,
+          correctAnswer: q.correctAnswer,
+          explanation: q.explanation,
+          errorType: (['grammar', 'vocabulary', 'tense', 'agreement', 'other'].includes(q.category)
+            ? q.category
+            : 'grammar') as 'grammar' | 'vocabulary' | 'tense' | 'agreement' | 'other',
+        });
+        exists = saved.toObject();
       }
-      const saved = await QuestionBankModel.create({
-        type: quizType,
-        difficulty: q.difficulty,
-        questionText: q.questionText,
-        options: q.options,
-        correctAnswer: q.correctAnswer,
-        explanation: q.explanation,
-        errorType: (['grammar', 'vocabulary', 'tense', 'agreement', 'other'].includes(q.category)
-          ? q.category
-          : 'grammar') as 'grammar' | 'vocabulary' | 'tense' | 'agreement' | 'other',
-      });
-      selected.push(saved.toObject());
+      selected.push(exists);
     }
-    selected = selected
-      .filter((q, idx, arr) => arr.findIndex((x) => String(x.questionText) === String(q.questionText)) === idx)
-      .slice(0, limit);
+    selected = selected.slice(0, limit);
   }
 
   const difficultyLabel = (d: number) => (d <= 1 ? 'beginner' : d === 2 ? 'intermediate' : 'advanced');

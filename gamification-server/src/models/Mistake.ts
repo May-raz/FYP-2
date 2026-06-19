@@ -30,6 +30,7 @@ const mistakeSchema = new Schema(
       default: 'grammar_correction',
     },
     focusWord: { type: String, default: '' },
+    cardOptions: { type: [String], default: [] },
     nextReviewDate: { type: Date, required: true, index: true },
     intervalDays: { type: Number, required: true, min: 1, default: 1 },
     easeFactor: { type: Number, required: true, min: 1.3, default: 2.5 },

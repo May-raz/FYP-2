@@ -902,23 +902,31 @@ button:disabled, .btn-primary:disabled, .btn-secondary:disabled {
 }
 
 .dashboard-progress-notice {
-  background: rgba(34, 197, 94, 0.12);
-  border: 1px solid rgba(34, 197, 94, 0.35);
+  background: color-mix(in srgb, var(--bg-primary) 88%, var(--primary-color));
+  border: 1px solid var(--border-color-light);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 0 1.25rem 0.75rem;
+  color: var(--text-primary);
+}
+
+html[data-theme='dark'] .dashboard-progress-notice {
+  background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--primary-color));
 }
 
 .xp-progress-track {
   margin-top: 10px;
   width: 100%;
-  height: 10px;
+  height: 8px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--bg-primary) 75%, #cbd5e1);
+  background: var(--bg-tertiary);
   overflow: hidden;
 }
 
 .xp-progress-fill {
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(90deg, var(--primary-color), var(--success-color));
+  background: linear-gradient(90deg, var(--primary-color), var(--primary-light));
   transition: width 280ms ease;
 }
 
@@ -1874,6 +1882,194 @@ button:disabled, .btn-primary:disabled, .btn-secondary:disabled {
 
 .encouraging-feedback {
   font-weight: 600;
+}
+
+/* Flashcards v2 */
+.flashcards-page-v2 .flashcards-shell {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.fc-review-layout {
+  display: grid;
+  gap: 14px;
+}
+
+.fc-progress-header {
+  display: grid;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.fc-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+}
+
+.fc-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary-color), var(--primary-light));
+  border-radius: 999px;
+  transition: width 240ms ease;
+}
+
+.fc-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color-light);
+  border-radius: 16px;
+  padding: 22px;
+  box-shadow: var(--shadow-sm);
+}
+
+.fc-card.is-revealed {
+  border-color: color-mix(in srgb, var(--primary-color) 45%, var(--border-color-light));
+}
+
+.fc-card-top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.fc-type-badge,
+.fc-focus-badge {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.fc-prompt-label {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.fc-card-front,
+.fc-card-back {
+  font-size: 1.1rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  color: var(--text-primary);
+}
+
+.fc-option-list {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--text-primary);
+}
+
+.fc-answer-block {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color-light);
+}
+
+.fc-explanation {
+  margin-top: 10px;
+  color: var(--text-secondary);
+}
+
+.fc-action-row,
+.fc-review-row,
+.pronunciation-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.fc-review-row {
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color-light);
+}
+
+.inline-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+}
+
+.centered-loading {
+  display: flex;
+  justify-content: center;
+  padding: 40px 0;
+}
+
+/* Pronunciation modal polish */
+.pronunciation-practice-modal {
+  max-width: 720px;
+  width: min(96vw, 720px);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.pronunciation-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.pronunciation-breakdown,
+.pronunciation-tip-line,
+.pronunciation-transcript {
+  color: var(--text-secondary);
+  margin-top: 8px;
+}
+
+html[data-theme='dark'] .fc-card,
+html[data-theme='dark'] .pronunciation-practice .pronunciation-target-card,
+html[data-theme='dark'] .pronunciation-practice .pronunciation-record-card,
+html[data-theme='dark'] .profile-section,
+html[data-theme='dark'] .story-card,
+html[data-theme='dark'] .modal-content {
+  background: var(--bg-primary);
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
+
+html[data-theme='dark'] .btn-outline,
+html[data-theme='dark'] .btn-secondary,
+html[data-theme='dark'] .leader-row {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--border-color);
+}
+
+html[data-theme='dark'] .score-fill.pronunciation,
+html[data-theme='dark'] .score-fill.grammar,
+html[data-theme='dark'] .score-fill.fluency {
+  opacity: 0.95;
+}
+
+html[data-theme='dark'] .analysis-pill,
+html[data-theme='dark'] .fc-type-badge,
+html[data-theme='dark'] .fc-focus-badge {
+  background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--primary-color));
+  color: var(--text-primary);
+}
+
+html[data-theme='dark'] .emotion-pill.good {
+  background: color-mix(in srgb, var(--success-color) 22%, var(--bg-tertiary));
+  color: var(--text-primary);
+}
+
+html[data-theme='dark'] .emotion-pill.bad {
+  background: color-mix(in srgb, var(--error-color) 20%, var(--bg-tertiary));
+  color: var(--text-primary);
+}
+
+html[data-theme='dark'] select.btn-secondary {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 
 .emotion-row {

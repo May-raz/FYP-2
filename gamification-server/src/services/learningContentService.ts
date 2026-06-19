@@ -20,6 +20,7 @@ export interface GeneratedFlashcard {
   errorType: 'grammar' | 'vocabulary' | 'tense' | 'agreement' | 'other';
   errorTag: string;
   focusWord?: string;
+  cardOptions?: string[];
 }
 
 export interface GeneratedQuizQuestion {
@@ -316,9 +317,91 @@ const OPENAI_FALLBACK_FLASHCARDS: GeneratedFlashcard[] = [
     errorTag: 'past_simple',
     focusWord: 'go',
   },
+  {
+    cardSubtype: 'sentence_improvement',
+    cardFront: 'Convert to past tense: I go to class every day.',
+    cardBack: 'I went to class every day.',
+    cardExplanation: 'Past simple of go is went.',
+    originalUtterance: 'I go to class every day.',
+    correctedForm: 'I went to class every day.',
+    errorType: 'tense',
+    errorTag: 'past_tense',
+    focusWord: 'went',
+  },
+  {
+    cardSubtype: 'vocabulary',
+    cardFront: 'Use this word in a sentence: confident',
+    cardBack: 'I feel confident when I speak English in class.',
+    cardExplanation: 'Put the target word in a natural full sentence.',
+    originalUtterance: 'confident',
+    correctedForm: 'I feel confident when I speak English in class.',
+    errorType: 'vocabulary',
+    errorTag: 'vocabulary_use',
+    focusWord: 'confident',
+  },
+  {
+    cardSubtype: 'choose_sentence',
+    cardFront: 'Choose the correct sentence:',
+    cardBack: 'B) He goes to university every day.',
+    cardExplanation: 'Use goes with he/she/it in present simple.',
+    originalUtterance: 'He go to university every day.',
+    correctedForm: 'He goes to university every day.',
+    errorType: 'grammar',
+    errorTag: 'present_simple_agreement',
+    focusWord: 'goes',
+    cardOptions: ['A) He go to university every day.', 'B) He goes to university every day.', 'C) He going to university every day.'],
+  },
+  {
+    cardSubtype: 'pronunciation',
+    cardFront: 'Pronounce: entrepreneur',
+    cardBack: 'ahn-truh-pruh-NUR',
+    cardExplanation: 'Stress -NUR-; break into four syllables.',
+    originalUtterance: 'entrepreneur',
+    correctedForm: 'entrepreneur',
+    errorType: 'vocabulary',
+    errorTag: 'pronunciation',
+    focusWord: 'entrepreneur',
+  },
+  {
+    cardSubtype: 'sentence_improvement',
+    cardFront: 'Fix this sentence: I am agree with you.',
+    cardBack: 'I agree with you.',
+    cardExplanation: 'Do not use "am" before "agree".',
+    originalUtterance: 'I am agree with you.',
+    correctedForm: 'I agree with you.',
+    errorType: 'grammar',
+    errorTag: 'verb_pattern',
+  },
+  {
+    cardSubtype: 'fill_blank',
+    cardFront: 'Fill in the blank: They ___ (watch) TV every evening.',
+    cardBack: 'watch',
+    cardExplanation: 'Plural subject uses base verb in present simple.',
+    originalUtterance: 'They watches TV every evening.',
+    correctedForm: 'They watch TV every evening.',
+    errorType: 'grammar',
+    errorTag: 'present_simple',
+    focusWord: 'watch',
+  },
+  {
+    cardSubtype: 'choose_sentence',
+    cardFront: 'Choose the correct sentence:',
+    cardBack: 'B) She has lived here since 2020.',
+    cardExplanation: 'Use since + starting point with present perfect.',
+    originalUtterance: 'She has lived here for 2020.',
+    correctedForm: 'She has lived here since 2020.',
+    errorType: 'grammar',
+    errorTag: 'present_perfect',
+    focusWord: 'since',
+    cardOptions: ['A) She has lived here for 2020.', 'B) She has lived here since 2020.', 'C) She lives here since 2020.'],
+  },
 ];
 
 export const DEMO_FLASHCARD_DECK = OPENAI_FALLBACK_FLASHCARDS;
+
+export function getShuffledDemoDeck(limit = 20): GeneratedFlashcard[] {
+  return [...DEMO_FLASHCARD_DECK].sort(() => Math.random() - 0.5).slice(0, limit);
+}
 
 export const EXPANDED_GRAMMAR_QUESTIONS: GeneratedQuizQuestion[] = [
   { questionText: 'Choose the correct sentence.', options: ['She go to school every day.', 'She goes to school every day.', 'She going to school every day.'], correctAnswer: 'She goes to school every day.', explanation: 'Third-person singular uses -s/-es.', difficulty: 1, category: 'present_simple', questionType: 'choose_sentence' },
@@ -485,6 +568,7 @@ export async function persistFlashcards(userId: mongoose.Types.ObjectId, cards: 
       cardExplanation: card.cardExplanation,
       cardSubtype: card.cardSubtype,
       focusWord: card.focusWord ?? '',
+      cardOptions: card.cardOptions ?? [],
       nextReviewDate: new Date(),
       intervalDays: 1,
       easeFactor: 2.5,

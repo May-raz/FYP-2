@@ -1218,60 +1218,28 @@ const LoginPage = () => {
   );
 };
 
-// FIX #3: Interactive Pronunciation Practice
-const AdvancedPronunciationAssessment = ({ onClose }) => {
-  const [targetPhrase, setTargetPhrase] = useState('');
+// Interactive Pronunciation Practice
+const AdvancedPronunciationAssessment = ({ onClose, initialPhrase = '' }) => {
+  const [phraseItem, setPhraseItem] = useState(null);
   const [transcript, setTranscript] = useState('');
   const [assessment, setAssessment] = useState(null);
-  const [loadingPhrase, setLoadingPhrase] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [phraseLoading, setPhraseLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isAssessing, setIsAssessing] = useState(false);
+  const [ttsLoading, setTtsLoading] = useState(false);
   const [ttsError, setTtsError] = useState('');
   const [error, setError] = useState('');
   const mediaRecorderRef = useRef(null);
   const streamRef = useRef(null);
   const chunksRef = useRef([]);
 
-  const loadPhrase = useCallback(async (current) => {
-    setLoadingPhrase(true);
-    setError('');
-    setAssessment(null);
-    setTranscript('');
-    try {
-      const query = current ? `?current=${encodeURIComponent(current)}` : '';
-      const response = await axios.get(`/api/pronunciation/practice-phrase${query}`);
-      setTargetPhrase(String(response.data?.phrase || ''));
-    } catch (err) {
-      setError(err.response?.data?.error || 'Failed to load practice phrase');
-    } finally {
-      setLoadingPhrase(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadPhrase();
-  }, [loadPhrase]);
-
-  const playTarget = useCallback(() => {
-    if (!targetPhrase) return;
-    setTtsError('');
-    speakAssistantText(targetPhrase, {
-      audioEnabled: true,
-      apiBaseUrl: API_BASE,
-      authHeaders,
-      characterId: 'emma',
-      challengeMode: false,
-      slow: true,
-      onError: (e) => {
-        const msg = String(e?.message || '');
-        setTtsError(msg.includes('unavailable') || msg.includes('not configured') ? 'Voice service temporarily unavailable.' : msg || 'Could not play audio.');
-      },
-    });
-  }, [targetPhrase]);
-
-  const stopRecording = useCallback(() => {
+  const stopRecordingTracks = useCallback(() => {
     const recorder = mediaRecorderRef.current;
-    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    if (recorder && recorder.state !== 'inactive') {
+      try { recorder.stop(); } catch (_) { /* ignore */ }
+    }
+    mediaRecorderRef.current = null;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -1279,10 +1247,73 @@ const AdvancedPronunciationAssessment = ({ onClose }) => {
     setIsRecording(false);
   }, []);
 
-  const startRecording = useCallback(async () => {
-    setError('');
-    setAssessment(null);
+  const resetPracticeState = useCallback(() => {
+    stopTts();
     setTranscript('');
+    setAssessment(null);
+    setError('');
+    setTtsError('');
+    setIsAssessing(false);
+    stopRecordingTracks();
+  }, [stopRecordingTracks]);
+
+  const loadPhrase = useCallback(async ({ excludeText = '', requestedText = '', showInitialSpinner = false } = {}) => {
+    if (showInitialSpinner) setInitialLoading(true);
+    else setPhraseLoading(true);
+    resetPracticeState();
+    try {
+      const params = new URLSearchParams();
+      if (requestedText) params.set('text', requestedText);
+      else if (excludeText) params.set('current', excludeText);
+      const query = params.toString() ? `?${params.toString()}` : '';
+      const response = await axios.get(`/api/pronunciation/practice-phrase${query}`);
+      const item = response.data?.item || {
+        text: String(response.data?.phrase || ''),
+        difficulty: 'intermediate',
+        category: 'daily conversation',
+        focusSound: 'clarity',
+        breakdown: '',
+        tip: 'Speak clearly and naturally.',
+      };
+      setPhraseItem(item);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to load practice phrase');
+    } finally {
+      if (showInitialSpinner) setInitialLoading(false);
+      else setPhraseLoading(false);
+    }
+  }, [resetPracticeState]);
+
+  useEffect(() => {
+    loadPhrase({ requestedText: initialPhrase, showInitialSpinner: true });
+  }, [initialPhrase, loadPhrase]);
+
+  const targetPhrase = phraseItem?.text || '';
+
+  const playTarget = useCallback(() => {
+    if (!targetPhrase || ttsLoading) return;
+    setTtsError('');
+    setTtsLoading(true);
+    stopTts();
+    speakAssistantText(targetPhrase, {
+      audioEnabled: true,
+      apiBaseUrl: API_BASE,
+      authHeaders,
+      characterId: 'emma',
+      challengeMode: false,
+      slow: true,
+      onDone: () => setTtsLoading(false),
+      onError: (e) => {
+        setTtsLoading(false);
+        const msg = String(e?.message || '');
+        setTtsError(msg.includes('unavailable') || msg.includes('not configured') ? 'Voice service temporarily unavailable.' : msg || 'Could not play audio.');
+      },
+    });
+  }, [targetPhrase, ttsLoading]);
+
+  const startRecording = useCallback(async () => {
+    if (!targetPhrase || isAssessing) return;
+    resetPracticeState();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -1329,17 +1360,20 @@ const AdvancedPronunciationAssessment = ({ onClose }) => {
       };
       recorder.start();
       setIsRecording(true);
-    } catch (err) {
+    } catch (_) {
       setError('Microphone access is required for pronunciation practice.');
     }
-  }, [targetPhrase]);
+  }, [targetPhrase, isAssessing, resetPracticeState]);
 
-  useEffect(() => () => stopRecording(), [stopRecording]);
+  useEffect(() => () => {
+    stopTts();
+    stopRecordingTracks();
+  }, [stopRecordingTracks]);
 
-  if (loadingPhrase) {
+  if (initialLoading) {
     return (
       <div className="assessment-modal">
-        <div className="modal-content">
+        <div className="modal-content pronunciation-practice-modal">
           <div className="loading-container">
             <div className="loading-spinner"></div>
             <p>Loading pronunciation practice...</p>
@@ -1351,42 +1385,62 @@ const AdvancedPronunciationAssessment = ({ onClose }) => {
 
   return (
     <div className="assessment-modal">
-      <div className="modal-content advanced-assessment pronunciation-practice">
+      <div className="modal-content advanced-assessment pronunciation-practice pronunciation-practice-modal">
         <div className="modal-header">
-          <h2>🎙️ Pronunciation Practice</h2>
-          <button onClick={onClose} className="close-button">×</button>
+          <h2>🎙️ Advanced Pronunciation</h2>
+          <button type="button" onClick={onClose} className="close-button" aria-label="Close">×</button>
         </div>
 
         <div className="assessment-content">
           <div className="pronunciation-target-card">
+            <div className="pronunciation-meta-row">
+              <span className="analysis-pill">{phraseItem?.difficulty || 'intermediate'}</span>
+              <span className="analysis-pill">{phraseItem?.category || 'practice'}</span>
+              <span className="analysis-pill">{`Focus: ${phraseItem?.focusSound || 'clarity'}`}</span>
+            </div>
             <h3>Say this phrase</h3>
-            <p className="partner-summary-text pronunciation-target-text">{targetPhrase}</p>
-            <div className="summary-actions">
-              <button type="button" className="btn-primary" onClick={playTarget}>🔊 Hear Emma</button>
-              <button type="button" className="btn-secondary" onClick={() => loadPhrase(targetPhrase)}>➡️ New phrase</button>
+            <p className="pronunciation-target-text">{targetPhrase}</p>
+            {phraseItem?.breakdown ? (
+              <p className="pronunciation-breakdown"><strong>Breakdown:</strong> {phraseItem.breakdown}</p>
+            ) : null}
+            {phraseItem?.tip ? <p className="pronunciation-tip-line">{phraseItem.tip}</p> : null}
+            <div className="pronunciation-action-row">
+              <button type="button" className="btn-primary" onClick={playTarget} disabled={ttsLoading || phraseLoading}>
+                {ttsLoading ? 'Playing...' : '🔊 Hear Emma'}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={phraseLoading}
+                onClick={() => loadPhrase({ excludeText: targetPhrase })}
+              >
+                {phraseLoading ? 'Loading...' : '➡️ New Phrase'}
+              </button>
             </div>
             {ttsError ? <p className="pronunciation-tts-error">{ttsError}</p> : null}
           </div>
 
           <div className="pronunciation-record-card">
             <h3>Your turn</h3>
-            <p>Record yourself, then get pronunciation feedback (not grammar-only).</p>
-            <div className="summary-actions">
+            <p>Record yourself, then get pronunciation feedback.</p>
+            <div className="pronunciation-action-row">
               {!isRecording ? (
-                <button type="button" className="btn-primary" onClick={startRecording} disabled={isAssessing}>
-                  🎤 Start recording
+                <button type="button" className="btn-primary" onClick={startRecording} disabled={isAssessing || phraseLoading}>
+                  🎤 Start Recording
                 </button>
               ) : (
-                <button type="button" className="btn-secondary" onClick={stopRecording}>
-                  ⏹ Stop & assess
+                <button type="button" className="btn-secondary" onClick={stopRecordingTracks}>
+                  ⏹ Stop & Assess
                 </button>
               )}
-              <button type="button" className="btn-secondary" onClick={() => { setTranscript(''); setAssessment(null); setError(''); }}>
-                🔁 Retry phrase
+              <button type="button" className="btn-secondary" onClick={resetPracticeState} disabled={isRecording}>
+                🔁 Practice Again
               </button>
             </div>
-            {isAssessing ? <p>Analyzing your pronunciation...</p> : null}
-            {transcript ? <p><strong>You said:</strong> {transcript}</p> : null}
+            {isAssessing ? (
+              <div className="inline-loading"><div className="loading-spinner small"></div><span>Analyzing your pronunciation...</span></div>
+            ) : null}
+            {transcript ? <p className="pronunciation-transcript"><strong>You said:</strong> {transcript}</p> : null}
             {error ? <p className="pronunciation-tts-error">{error}</p> : null}
           </div>
 
@@ -1409,9 +1463,6 @@ const AdvancedPronunciationAssessment = ({ onClose }) => {
                   </div>
                 </div>
               )}
-              {!!assessment.missingWords?.length && (
-                <p><strong>Missing:</strong> {assessment.missingWords.join(', ')}</p>
-              )}
               {!!assessment.tips?.length && (
                 <div className="analysis-section">
                   <h4>Tips</h4>
@@ -1420,13 +1471,10 @@ const AdvancedPronunciationAssessment = ({ onClose }) => {
               )}
               {!!assessment.suggestedPractice?.length && (
                 <div className="analysis-section">
-                  <h4>Practice</h4>
+                  <h4>Keep practicing</h4>
                   <ul>{assessment.suggestedPractice.map((p, i) => <li key={i}>{p}</li>)}</ul>
                 </div>
               )}
-              {assessment.correctedPhrase ? (
-                <p><strong>Target:</strong> {assessment.correctedPhrase}</p>
-              ) : null}
             </div>
           )}
         </div>
@@ -3658,61 +3706,60 @@ const LeaderboardPage = () => {
 const FlashcardsPage = () => {
   const [cards, setCards] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [activeCardId, setActiveCardId] = useState(null);
+  const [activeIndex, setActiveIndex] = useState(0);
   const [revealAnswer, setRevealAnswer] = useState(false);
-  const [slowVoice, setSlowVoice] = useState(false);
-  const [lastSpokenText, setLastSpokenText] = useState('');
   const [reviewSaving, setReviewSaving] = useState(false);
-  const [sessionStats, setSessionStats] = useState({ reviewed: 0, easy: 0, medium: 0, hard: 0 });
+  const [speakLoading, setSpeakLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [practicePhrase, setPracticePhrase] = useState('');
   const navigate = useNavigate();
 
-  const speak = useCallback((text, slow = false) => {
+  const activeCard = cards[activeIndex] || null;
+
+  const speakText = useCallback((text) => {
     const content = String(text || '').trim();
-    if (!content) {
-      alert('No pronunciation text is available for this card yet.');
-      return;
-    }
-    setLastSpokenText(content);
+    if (!content || speakLoading) return;
+    setSpeakLoading(true);
+    stopTts();
     speakAssistantText(content, {
       audioEnabled: true,
       apiBaseUrl: API_BASE,
       authHeaders,
       characterId: 'emma',
       challengeMode: false,
-      slow,
-      onError: (e) => console.warn('Flashcard TTS error:', e?.message || e),
+      slow: true,
+      onDone: () => setSpeakLoading(false),
+      onError: () => setSpeakLoading(false),
     });
-  }, []);
+  }, [speakLoading]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const res = await axios.get(`${GAMIFICATION_BASE}/api/v1/gamification/flashcards/due/me?limit=20`, {
         headers: authHeaders(),
+        timeout: 15000,
       });
       const incomingCards = res.data?.cards || [];
       setCards(incomingCards);
-      const keepCurrent = incomingCards.some((c) => c._id === activeCardId) ? activeCardId : (incomingCards[0]?._id || null);
-      setActiveCardId(keepCurrent);
+      setActiveIndex(0);
       setRevealAnswer(false);
     } finally {
       setLoading(false);
     }
-  }, [activeCardId]);
+  }, []);
 
-  const regenerate = useCallback(async () => {
+  const resetDemoDeck = useCallback(async () => {
     setGenerating(true);
     try {
       await axios.post(
-        `${GAMIFICATION_BASE}/api/v1/gamification/flashcards/generate`,
-        { limit: 8 },
-        { headers: authHeaders(), timeout: 45000 }
+        `${GAMIFICATION_BASE}/api/v1/gamification/flashcards/reset-demo`,
+        { limit: 20 },
+        { headers: authHeaders(), timeout: 20000 }
       );
       await refresh();
     } catch (err) {
-      console.error('Flashcard generation failed:', err);
-      alert(err?.response?.data?.error || 'Could not generate flashcards right now.');
+      alert(err?.response?.data?.error || 'Could not reset flashcards right now.');
     } finally {
       setGenerating(false);
     }
@@ -3720,151 +3767,168 @@ const FlashcardsPage = () => {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  useEffect(() => {
-    if (!cards.length) {
-      setActiveCardId(null);
-      return;
-    }
-    if (!activeCardId || !cards.some((c) => c._id === activeCardId)) {
-      setActiveCardId(cards[0]._id);
-    }
-  }, [cards, activeCardId]);
+  const advanceAfterReview = useCallback((removedId) => {
+    setCards((prev) => {
+      const idx = prev.findIndex((c) => c._id === removedId);
+      const next = prev.filter((c) => c._id !== removedId);
+      if (!next.length) {
+        setActiveIndex(0);
+      } else if (idx >= next.length) {
+        setActiveIndex(next.length - 1);
+      } else {
+        setActiveIndex(idx);
+      }
+      return next;
+    });
+    setRevealAnswer(false);
+  }, []);
 
   const review = async (mistakeId, result) => {
+    if (reviewSaving) return;
     try {
       setReviewSaving(true);
-      const res = await axios.post(`${GAMIFICATION_BASE}/api/v1/gamification/flashcards/review`, { mistakeId, result }, {
-        headers: authHeaders(),
-      });
-      const resultApplied = String(res.data?.resultApplied || result);
-      setSessionStats((prev) => ({
-        reviewed: prev.reviewed + 1,
-        easy: prev.easy + (resultApplied === 'easy' ? 1 : 0),
-        medium: prev.medium + (resultApplied === 'medium' ? 1 : 0),
-        hard: prev.hard + ((resultApplied === 'hard' || resultApplied === 'incorrect') ? 1 : 0),
-      }));
-      setCards((prev) => prev.filter((c) => c._id !== mistakeId));
-      setRevealAnswer(false);
+      await axios.post(
+        `${GAMIFICATION_BASE}/api/v1/gamification/flashcards/review`,
+        { mistakeId, result },
+        { headers: authHeaders(), timeout: 12000 }
+      );
+      advanceAfterReview(mistakeId);
     } catch (err) {
-      console.error('Flashcard review failed:', err);
-      alert('Could not save flashcard review right now. Please try again.');
+      alert('Could not save your review. Please try again.');
     } finally {
       setReviewSaving(false);
     }
   };
 
-  const activeCard = cards.find((c) => c._id === activeCardId) || cards[0] || null;
-  const pronunciationDue = cards.filter((c) => c.cardType === 'pronunciation_review').length;
-  const grammarDue = cards.filter((c) => c.cardType === 'grammar_correction').length;
-  const highPriorityDue = cards.filter((c) => c.lastReviewResult === 'incorrect' || c.lastReviewResult === 'hard').length;
+  const cardTypeLabel = (card) => {
+    const subtype = card?.cardSubtype || card?.cardType || 'review';
+    return String(subtype).replace(/_/g, ' ');
+  };
+
+  const speakTarget = activeCard
+    ? (activeCard.cardType === 'pronunciation_review' || activeCard.cardSubtype === 'pronunciation'
+        ? (activeCard.focusWord || activeCard.cardBack || activeCard.correctedForm)
+        : (activeCard.focusWord || activeCard.correctedForm || activeCard.cardBack))
+    : '';
 
   return (
-    <div className="dashboard">
+    <div className="dashboard flashcards-page-v2">
       <header className="dashboard-header">
         <div className="header-content"><h1>🃏 Flashcards</h1></div>
         <div className="header-actions">
-          <button className="btn-secondary" disabled={generating} onClick={regenerate}>
-            {generating ? 'Generating...' : 'Regenerate'}
+          <button type="button" className="btn-secondary" disabled={generating} onClick={resetDemoDeck}>
+            {generating ? 'Resetting...' : 'Reset demo deck'}
           </button>
-          <button className="btn-secondary" onClick={() => navigate('/stats')}>Back to Dashboard</button>
+          <button type="button" className="btn-secondary" onClick={() => navigate('/stats')}>Back</button>
         </div>
       </header>
-      <div className="stats-overview">
-        {loading ? <p>Loading due flashcards...</p> : cards.length === 0 ? (
+
+      <div className="stats-overview flashcards-shell">
+        {loading ? (
+          <div className="inline-loading centered-loading"><div className="loading-spinner"></div><span>Loading flashcards...</span></div>
+        ) : cards.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-state-icon">✅</div>
-            <div className="empty-state-title">No flashcards due right now</div>
-            <div className="empty-state-description">
-              Chat with Emma to build cards from real mistakes, or generate a starter deck now.
-            </div>
-            <button className="btn-primary" style={{ marginTop: 16 }} disabled={generating} onClick={regenerate}>
-              {generating ? 'Generating...' : 'Generate flashcards'}
+            <div className="empty-state-icon">📚</div>
+            <div className="empty-state-title">No flashcards ready</div>
+            <div className="empty-state-description">Load a useful demo deck for your presentation.</div>
+            <button type="button" className="btn-primary" disabled={generating} onClick={resetDemoDeck}>
+              {generating ? 'Loading deck...' : 'Load demo flashcards'}
             </button>
           </div>
-        ) : (
-          <>
-            <div className="wpm-trend-row">
-              <span><strong>Due now:</strong> {cards.length}</span>
-              <span><strong>Pronunciation:</strong> {pronunciationDue}</span>
-              <span><strong>Grammar:</strong> {grammarDue}</span>
-              <span><strong>Priority:</strong> {highPriorityDue}</span>
-              <span><strong>Reviewed this session:</strong> {sessionStats.reviewed}</span>
+        ) : activeCard && (
+          <div className="fc-review-layout">
+            <div className="fc-progress-header">
+              <span>{`Card ${activeIndex + 1} of ${cards.length}`}</span>
+              <div className="fc-progress-track" aria-hidden="true">
+                <div className="fc-progress-fill" style={{ width: `${((activeIndex + 1) / cards.length) * 100}%` }} />
+              </div>
             </div>
 
-            <div className="flashcard-stage">
-              <aside className="flashcard-queue">
-                {cards.map((c, idx) => (
-                  <button
-                    key={c._id}
-                    type="button"
-                    className={`leader-row ${activeCard?._id === c._id ? 'selected-option' : ''}`}
-                    onClick={() => {
-                      setActiveCardId(c._id);
-                      setRevealAnswer(false);
-                    }}
-                  >
-                    <span>{`#${idx + 1} ${c.focusWord || c.errorType}`}</span>
-                    <span>{c.cardType?.replace(/_/g, ' ')}</span>
-                  </button>
-                ))}
-              </aside>
+            <article className={`fc-card ${revealAnswer ? 'is-revealed' : ''}`}>
+              <div className="fc-card-top">
+                <span className="fc-type-badge">{cardTypeLabel(activeCard)}</span>
+                {activeCard.focusWord ? <span className="fc-focus-badge">{`Focus: ${activeCard.focusWord}`}</span> : null}
+              </div>
 
-              {activeCard && (
-                <div className={`flashcard-panel ${revealAnswer ? 'revealed' : ''}`}>
-                  <div className="flashcard-meta">
-                    <span className="analysis-pill">{activeCard.cardType?.replace(/_/g, ' ')}</span>
-                    <span className="analysis-pill">{`Review #${activeCard.reviewCount || 0}`}</span>
-                    <span className="analysis-pill">{`Focus: ${activeCard.focusWord || 'clarity'}`}</span>
-                  </div>
-                  <h3>Practice prompt</h3>
-                  <p className="partner-summary-text flashcard-front">{activeCard.cardFront || activeCard.whatIncorrect}</p>
-                  {revealAnswer && (
-                    <>
-                      <h3>Answer</h3>
-                      <p className="partner-summary-text flashcard-back">{activeCard.cardBack || activeCard.improvedPhrasing || activeCard.correctedForm}</p>
-                      {activeCard.cardExplanation ? (
-                        <p><strong>Why:</strong> {activeCard.cardExplanation}</p>
-                      ) : null}
-                      {!!activeCard.addedWords?.length && (
-                        <p>{`Added words: ${activeCard.addedWords.join(', ')}`}</p>
-                      )}
-                      {!!activeCard.removedWords?.length && (
-                        <p>{`Removed words: ${activeCard.removedWords.join(', ')}`}</p>
-                      )}
-                    </>
-                  )}
+              <h3 className="fc-prompt-label">Practice prompt</h3>
+              <p className="fc-card-front">{activeCard.cardFront || activeCard.whatIncorrect}</p>
 
-                  <div className="summary-actions">
-                    <button className="btn-secondary" onClick={() => setRevealAnswer((v) => !v)}>
-                      {revealAnswer ? 'Hide answer' : 'Reveal answer'}
-                    </button>
-                    <button className="btn-secondary" onClick={() => speak(activeCard.focusWord || activeCard.correctedForm, slowVoice)}>
-                      🔊 Pronounce word
-                    </button>
-                    <button className="btn-secondary" onClick={() => speak(activeCard.correctedForm, slowVoice)}>
-                      🗣️ Read sentence
-                    </button>
-                    <button className="btn-secondary" onClick={() => speak(lastSpokenText || activeCard.correctedForm, slowVoice)}>
-                      🔁 Replay
-                    </button>
-                    <button className={`btn-secondary ${slowVoice ? 'active' : ''}`} onClick={() => setSlowVoice((v) => !v)}>
-                      {slowVoice ? 'Slow mode: On' : 'Slow mode: Off'}
-                    </button>
-                  </div>
+              {!!activeCard.cardOptions?.length && !revealAnswer && (
+                <ul className="fc-option-list">
+                  {activeCard.cardOptions.map((opt) => <li key={opt}>{opt}</li>)}
+                </ul>
+              )}
 
-                  <div className="summary-actions">
-                    <button className="btn-secondary" disabled={reviewSaving} onClick={() => review(activeCard._id, 'incorrect')}>Again</button>
-                    <button className="btn-secondary" disabled={reviewSaving} onClick={() => review(activeCard._id, 'hard')}>Hard</button>
-                    <button className="btn-secondary" disabled={reviewSaving} onClick={() => review(activeCard._id, 'medium')}>Medium</button>
-                    <button className="btn-primary" disabled={reviewSaving} onClick={() => review(activeCard._id, 'easy')}>Easy</button>
-                    <button className="btn-secondary" disabled={reviewSaving} onClick={() => review(activeCard._id, 'skipped')}>Skip</button>
-                  </div>
+              {revealAnswer && (
+                <div className="fc-answer-block">
+                  <h3 className="fc-prompt-label">Answer</h3>
+                  <p className="fc-card-back">{activeCard.cardBack || activeCard.improvedPhrasing || activeCard.correctedForm}</p>
+                  {activeCard.cardExplanation ? (
+                    <p className="fc-explanation"><strong>Why:</strong> {activeCard.cardExplanation}</p>
+                  ) : null}
                 </div>
               )}
-            </div>
-          </>
+
+              <div className="fc-action-row">
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={reviewSaving}
+                  onClick={() => setRevealAnswer((v) => !v)}
+                >
+                  {revealAnswer ? 'Hide Answer' : 'Show Answer'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={!speakTarget || speakLoading || reviewSaving}
+                  onClick={() => speakText(speakTarget)}
+                >
+                  {speakLoading ? 'Playing...' : '🔊 Hear Word'}
+                </button>
+                {(activeCard.cardType === 'pronunciation_review' || activeCard.cardSubtype === 'pronunciation') && (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={reviewSaving}
+                    onClick={() => setPracticePhrase(activeCard.focusWord || activeCard.originalUtterance || activeCard.cardFront)}
+                  >
+                    🎤 Practice Speaking
+                  </button>
+                )}
+              </div>
+
+              {revealAnswer && (
+                <div className="fc-review-row">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={reviewSaving}
+                    onClick={() => review(activeCard._id, 'easy')}
+                  >
+                    {reviewSaving ? 'Saving...' : '✓ I knew this'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={reviewSaving}
+                    onClick={() => review(activeCard._id, 'hard')}
+                  >
+                    Need practice
+                  </button>
+                </div>
+              )}
+            </article>
+          </div>
         )}
       </div>
+
+      {practicePhrase ? (
+        <AdvancedPronunciationAssessment
+          initialPhrase={practicePhrase}
+          onClose={() => setPracticePhrase('')}
+        />
+      ) : null}
     </div>
   );
 };
@@ -3885,7 +3949,7 @@ const QuizPage = () => {
       const difficultyQuery = difficulty > 0 ? `&difficulty=${difficulty}` : '';
       const res = await axios.get(
         `${GAMIFICATION_BASE}/api/v1/gamification/quiz/questions?quizType=grammar&limit=10${difficultyQuery}`,
-        { headers: authHeaders(), timeout: 45000 }
+        { headers: authHeaders(), timeout: 12000 }
       );
       setQuestions(res.data?.questions || []);
     } finally {
@@ -3947,7 +4011,9 @@ const QuizPage = () => {
         </div>
       </header>
       <div className="stats-overview">
-        {loading ? <p>Loading questions...</p> : questions.length === 0 ? <p>No quiz questions available yet.</p> : questions.map((q, idx) => {
+        {loading ? (
+          <div className="inline-loading centered-loading"><div className="loading-spinner"></div><span>Loading quiz...</span></div>
+        ) : questions.length === 0 ? <p>No quiz questions available yet.</p> : questions.map((q, idx) => {
           const qid = q?.id || q?._id || `${idx}`;
           return (
           <div className="profile-section" key={qid}>

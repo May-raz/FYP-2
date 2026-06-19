@@ -23,6 +23,7 @@ import {
 import { synthesizeSpeechWithElevenLabs } from '../services/elevenLabsService';
 import {
   assessPronunciation,
+  findPracticePhraseByText,
   listPracticePhrases,
   pickPracticePhrase,
 } from '../services/pronunciationAssessmentService';
@@ -1204,11 +1205,16 @@ router.get('/chat/emotion-summary/:sessionId', async (req: Request, res: Respons
   });
 });
 
-router.get('/pronunciation/practice-phrase', (_req: Request, res: Response) => {
-  const current = String(_req.query?.current ?? '').trim();
+router.get('/pronunciation/practice-phrase', (req: Request, res: Response) => {
+  const current = String(req.query?.current ?? '').trim();
+  const requested = String(req.query?.text ?? '').trim();
+  const item = requested
+    ? (findPracticePhraseByText(requested) ?? pickPracticePhrase())
+    : pickPracticePhrase(current || undefined);
   res.json({
-    phrase: pickPracticePhrase(current || undefined),
-    phrases: listPracticePhrases(),
+    item,
+    phrase: item.text,
+    total: listPracticePhrases().length,
   });
 });
 
@@ -1233,10 +1239,12 @@ router.post('/pronunciation/assess', async (req: Request, res: Response) => {
 });
 
 router.get('/pronunciation/advanced-assessment', async (_req: Request, res: Response) => {
+  const item = pickPracticePhrase();
   res.json({
     mode: 'interactive_practice',
-    phrase: pickPracticePhrase(),
-    phrases: listPracticePhrases(),
+    item,
+    phrase: item.text,
+    total: listPracticePhrases().length,
     message: 'Use pronunciation practice to record, transcribe, and get feedback.',
   });
 });
